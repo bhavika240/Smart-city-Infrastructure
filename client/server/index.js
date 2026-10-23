@@ -123,8 +123,6 @@ function healCsvRows(rows) {
     const row = { ...original };
     let changed = false;
     let needsReview = false;
-
-    // Remove exact duplicate records.
     const fingerprint = JSON.stringify(
       Object.keys(row).sort().map((key) => [key, row[key]])
     );
@@ -137,7 +135,6 @@ function healCsvRows(rows) {
 
     seen.add(fingerprint);
 
-    // Repair missing or invalid numeric fields using median values.
     for (const key of numericKeys) {
       const field = key.toLowerCase();
       const raw = String(row[key] ?? '').trim();
@@ -163,7 +160,6 @@ function healCsvRows(rows) {
       }
     }
 
-    // Missing non-numeric fields cannot be safely guessed.
     for (const key of Object.keys(row)) {
       if (numericKeys.includes(key)) continue;
 
@@ -188,11 +184,10 @@ function healCsvRows(rows) {
     },
   };
 }
-
 app.post(
   '/api/data-healing/upload',
   upload.single('file'),
-  (req, res) => {
+  async (req, res, next) => {
     if (!req.file) {
       return res.status(400).json({
         success: false,
@@ -218,7 +213,27 @@ app.post(
         });
       }
 
-      const result = healCsvRows(rows);
+const result = healCsvRows(rows);
+const report = result.report;
+
+const eventStatus =
+  report.needsReview > 0
+    ? 'NEEDS_REVIEW'
+    : report.repairedValues > 0
+      ? 'REPAIRED'
+      : 'NO_REPAIR_NEEDED';
+
+const eventId = `NX-DH-${randomUUID()}`;
+
+await DataHealingEvent.create({
+  eventId,
+  eventType: 'CSV_DATA_HEALING',
+  status: eventStatus,
+  filename: req.file.originalname,
+  report,
+});
+      
+
       const originalPreview = rows.slice(0, 10).map(row => ({ ...row }));
       const repairedPreview = result.rows.slice(0, 10).map(row => ({ ...row }));
       const outputName = `healed-${randomUUID()}.csv`;
@@ -232,6 +247,8 @@ app.post(
 
       return res.json({
         success: true,
+        eventId,
+        eventStatus,
         message: 'CSV analysis completed.',
         healingMode: 'Conservative: uncertain values are flagged, not guessed.',
         report: result.report,
@@ -276,8 +293,6 @@ app.get('/api/data-healing/download/:filename', (req, res) => {
   return res.download(filePath, filename);
 });
 
-
-// 1. Simulated smart city services
 const SERVICE_SEED = [
   {
     id: 'powergrid',
@@ -344,8 +359,6 @@ const SERVICE_SEED = [
     metricUnit: 'ms',
   },
 ];
-
-// 2. MongoDB schemas
 const serviceSchema = new mongoose.Schema(
   {
     id: { type: String, unique: true, required: true },
@@ -406,6 +419,29 @@ const incidentSchema = new mongoose.Schema(
 
 const Service = mongoose.model('PhoenixService', serviceSchema);
 const Incident = mongoose.model('PhoenixIncident', incidentSchema);
+
+
+
+const dataHealingEventSchema = new mongoose.Schema(
+  {
+    eventId: { type: String, unique: true, required: true },
+    eventType: { type: String, default: 'CSV_DATA_HEALING' },
+    status: {
+      type: String,
+      enum: ['REPAIRED', 'NO_REPAIR_NEEDED', 'NEEDS_REVIEW', 'FAILED'],
+      default: 'NO_REPAIR_NEEDED',
+    },
+    filename: String,
+    report: { type: mongoose.Schema.Types.Mixed, default: {} },
+    createdAt: { type: Date, default: Date.now },
+  },
+  { versionKey: false }
+);
+
+const DataHealingEvent = mongoose.model(
+  'PhoenixDataHealingEvent',
+  dataHealingEventSchema
+);
 
 
 const quarantinedRecordSchema = new mongoose.Schema(
@@ -469,8 +505,6 @@ let monitorState = {
 let dbReady = false;
 const activeTests = new Set();
 
-// 3. Failure types
-
 const FAILURE_TYPES = [
   {
     type: 'PROCESS_CRASH',
@@ -506,7 +540,6 @@ const FAILURE_TYPES = [
   },
 ];
 
-// 4. Helper functions
 
 function publicService(service) {
   return {
@@ -569,9 +602,6 @@ async function getService(id) {
   return Service.findOne({ id });
 }
 
-// 5. Simulated smart-city dependency relationships
-// PowerGrid -> AquaFlow
-// CityLink -> MediCore
 const DEPENDENTS = {
   powergrid: ['aquaflow'],
   citylink: ['medicore'],
@@ -611,7 +641,6 @@ async function restoreDependents(serviceId) {
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
-// Retry dependency checks with exponential backoff
 
 async function retryDependencyWithBackoff(serviceId, maxAttempts = 4) {
   const baseDelayMs = 250;
@@ -641,7 +670,6 @@ async function retryDependencyWithBackoff(serviceId, maxAttempts = 4) {
     }
   }
 
-  // Retry failed: perform the recovery action.
   await updateService(serviceId, {
     dependencyAvailable: true,
   });
@@ -654,7 +682,6 @@ async function retryDependencyWithBackoff(serviceId, maxAttempts = 4) {
   };
 }
 
-// 6. Automatic health monitor with simulated live telemetry
 async function runHealthMonitor() {
   if (!dbReady || mongoose.connection.readyState !== 1) return;
 
@@ -686,8 +713,6 @@ async function runHealthMonitor() {
       );
 
       await updateService(service.id, { loadPct, latencyMs });
-
-      // Do not claim detection if the monitoring signal is unavailable.
       if (!service.monitorSignalAvailable) {
   failed++;
   continue;
@@ -709,7 +734,6 @@ async function runHealthMonitor() {
         await updateService(service.id, { status: nextStatus });
       }
 
-      // Do not interfere with a controlled Chaos Lab test.
       if (
         !checksPass &&
         healingEnabled &&
@@ -873,7 +897,6 @@ setInterval(() => {
   });
 }, MONITOR_INTERVAL_MS);
 
-// 7. Monitor endpoint
 app.get('/api/monitor', (_req, res) => {
   res.json({
     ...monitorState,
@@ -881,7 +904,6 @@ app.get('/api/monitor', (_req, res) => {
   });
 });
 
-// 8. Backend health endpoint
 app.get('/api/health', (_req, res) => {
   res.json({
     status: 'OK',
@@ -894,12 +916,10 @@ app.get('/api/health', (_req, res) => {
   });
 });
 
-// 9. Failure types
 app.get('/api/failure-types', (_req, res) => {
   res.json({ failureTypes: FAILURE_TYPES });
 });
 
-// 10. Services
 app.get('/api/services', async (_req, res, next) => {
   try {
     const services = await Service.find().sort({ id: 1 }).lean();
@@ -913,7 +933,6 @@ app.get('/api/services', async (_req, res, next) => {
   }
 });
 
-// 10A. Failure Prediction & Risk Score
 app.get('/api/risk-scores', async (_req, res, next) => {
   try {
     const services = await Service.find().sort({ id: 1 }).lean();
@@ -1045,7 +1064,6 @@ app.get('/api/incidents', async (_req, res, next) => {
   }
 });
 
-// 12. Reliability metrics
 app.get('/api/metrics', async (_req, res, next) => {
   try {
     const all = await Incident.find().lean();
@@ -1102,8 +1120,6 @@ app.get('/api/metrics', async (_req, res, next) => {
   }
 });
 
-
-// 13. Healing ON/OFF controls
 app.get('/api/healing', (_req, res) => {
   res.json({ healingEnabled });
 });
@@ -1126,11 +1142,22 @@ app.post('/api/healing', (req, res) => {
 });
 
 
-// 14. Inject a simulated failure and attempt automatic recovery
+app.get('/api/data-healing/events', async (_req, res, next) => {
+  try {
+    const events = await DataHealingEvent.find()
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .lean();
+
+    res.json({ events });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post(
   '/api/failures/:serviceId',
   (req, res, next) => {
-    // Apply rate limiting only to REQUEST_OVERLOAD injections.
     if (
       String(req.body?.type || 'PROCESS_CRASH').toUpperCase() ===
       'REQUEST_OVERLOAD'
@@ -1201,7 +1228,6 @@ app.post(
 
       await saveIncident(incident);
 
-      // Simulate a monitoring blind spot.
       if (type === 'UNOBSERVABLE_FAULT') {
         await updateService(serviceId, {
           monitorSignalAvailable: false,
@@ -1432,7 +1458,6 @@ incident.actionTakenAt = new Date();
   },
 );
 
-// 15. Manual recovery endpoint for demo cleanup
 app.post('/api/recovery/:serviceId', async (req, res, next) => {
   try {
     const service = await getService(
@@ -1488,7 +1513,6 @@ app.post('/api/recovery/:serviceId', async (req, res, next) => {
   }
 });
 
-// 16. Reset demo and clear incident history
 app.post('/api/reset', async (_req, res, next) => {
   try {
     if (activeTests.size > 0) {
@@ -1520,7 +1544,6 @@ app.post('/api/reset', async (_req, res, next) => {
   }
 });
 
-// 17. Export incident history as JSON
 app.get('/api/export/json', async (_req, res, next) => {
   try {
     const incidents = await Incident.find()
@@ -1561,7 +1584,6 @@ app.get('/api/export/json', async (_req, res, next) => {
   }
 });
 
-// 18. Export incident history as CSV
 app.get('/api/export/csv', async (_req, res, next) => {
   try {
     const incidents = await Incident.find()
@@ -1611,7 +1633,6 @@ app.get('/api/export/csv', async (_req, res, next) => {
   }
 });
 
-// 19. Error handler
 app.use((error, _req, res, _next) => {
   console.error('[NEXORA API error]', error);
 
@@ -1623,7 +1644,6 @@ app.use((error, _req, res, _next) => {
   });
 });
 
-// 20. Start server and connect MongoDB
 async function startServer() {
   try {
     await mongoose.connect(MONGO_URI, {

@@ -1836,9 +1836,6 @@ body:has(.app-shell.theme-light) {
       box-shadow 0.18s ease;
   }
 }
-
-
-/* Overview: Data Health & Healing */
 .data-health-overview {
   margin: 24px 0;
   min-width: 0;

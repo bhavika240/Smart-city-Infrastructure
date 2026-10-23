@@ -368,7 +368,6 @@ function BackendHealingGraph({
   );
 }
 
-
 type HealingReport = {
   totalRecords: number;
   missingValues: number;
@@ -391,6 +390,81 @@ type HealingResult = {
     repaired: Record<string, string>[];
   };
 };
+
+function DataHealingFlowGraph({
+  result,
+  busy,
+  error,
+}: {
+  result: HealingResult | null;
+  busy: boolean;
+  error: string;
+}) {
+  const hasResult = Boolean(result);
+  const report = result?.report;
+  const needsReview = (report?.needsReview ?? 0) > 0;
+  const repaired = (report?.repairedValues ?? 0) + (report?.repairedRecords ?? 0) + (report?.removedRecords ?? 0) > 0;
+  const failed = Boolean(error);
+  const stages = [
+    {
+      number: '01', title: 'CSV Upload', icon: '▤',
+      detail: busy ? 'Uploading dataset for processing' : hasResult ? `${report?.totalRecords ?? 0} input records received` : failed ? 'Upload or processing error' : 'Waiting for CSV upload',
+      done: hasResult, error: failed, state: busy ? 'IN PROGRESS' : hasResult ? 'COMPLETED' : failed ? 'FAILED' : 'WAITING',
+    },
+    {
+      number: '02', title: 'Data Validation', icon: '◉',
+      detail: hasResult ? `${report?.missingValues ?? 0} missing · ${report?.invalidValues ?? 0} invalid` : failed ? error : 'Validation starts after upload',
+      done: hasResult, error: failed, state: hasResult ? 'COMPLETED' : failed ? 'FAILED' : 'WAITING',
+    },
+    {
+      number: '03', title: 'Data Healing', icon: '⟳',
+      detail: hasResult ? repaired ? `${report?.repairedValues ?? 0} values repaired · ${report?.removedRecords ?? 0} duplicates removed` : 'No repairs needed for this dataset' : 'Waiting for validation result',
+      done: hasResult && !needsReview, error: failed || (hasResult && needsReview), state: !hasResult ? 'WAITING' : needsReview ? 'REVIEW' : repaired ? 'REPAIRED' : 'NO CHANGES',
+    },
+    {
+      number: '04', title: 'Output Verification', icon: '✓',
+      detail: hasResult ? `${report?.outputRecords ?? 0} output records · ${report?.needsReview ?? 0} need review` : 'Output checked after healing',
+      done: hasResult && !needsReview && !failed, error: failed || (hasResult && needsReview), state: !hasResult ? 'WAITING' : needsReview ? 'REVIEW REQUIRED' : 'VERIFIED',
+    },
+    {
+      number: '05', title: 'Result Recorded', icon: '▣',
+      detail: hasResult ? 'Healing report and repaired CSV are available' : failed ? 'Result was not recorded successfully' : 'No healing run recorded yet',
+      done: hasResult, error: failed, state: hasResult ? 'RECORDED' : failed ? 'FAILED' : 'WAITING',
+    },
+  ];
+  const badge = busy ? 'PROCESSING' : failed ? 'FAILED' : !hasResult ? 'AWAITING CSV' : needsReview ? 'REVIEW REQUIRED' : repaired ? 'HEALING COMPLETE' : 'NO REPAIR NEEDED';
+
+  return (
+    <section className="backend-live-graph data-healing-flow-graph">
+      <div className="backend-live-heading">
+        <div>
+          <p className="backend-live-label">NEXORA / DATA HEALING PIPELINE</p>
+          <h3>CSV Healing Workflow</h3>
+          <p>Updates from the latest Data Healing run. Chaos Lab's failure workflow remains unchanged.</p>
+        </div>
+        <span className={`backend-live-badge ${failed ? 'live-failed' : hasResult && !needsReview ? 'live-success' : 'live-waiting'}`}>● {badge}</span>
+      </div>
+      <div className="backend-pipeline">
+        {stages.map((stage, index) => (
+          <Fragment key={stage.number}>
+            <div className={`backend-pipeline-stage ${stage.done ? 'pipeline-done' : ''} ${stage.error ? 'pipeline-error' : ''} ${stage.state === 'IN PROGRESS' ? 'pipeline-active' : ''}`}>
+              <span className="pipeline-number">{stage.number}</span>
+              <span className="pipeline-icon">{stage.icon}</span>
+              <strong>{stage.title}</strong>
+              <small>{stage.detail}</small>
+              <span className="pipeline-state">{stage.state}</span>
+            </div>
+            {index < stages.length - 1 && <div className={`pipeline-connector ${stage.done ? 'connector-done' : ''}`} aria-hidden="true"><span>→</span></div>}
+          </Fragment>
+        ))}
+      </div>
+      <div className="backend-pipeline-footer">
+        <span><i className={`pipeline-dot ${failed ? 'dot-red' : hasResult && !needsReview ? 'dot-green' : ''}`} />{hasResult ? `Latest CSV run: ${report?.totalRecords ?? 0} input → ${report?.outputRecords ?? 0} output records` : 'Waiting for a CSV to be processed'}</span>
+        <span>{failed ? error : !hasResult ? 'Upload a CSV in Data Healing to populate this workflow' : needsReview ? 'Some records need review; output is not marked fully verified' : repaired ? 'Healing results processed and output generated' : 'No repair was required; output generated without changing values'}</span>
+      </div>
+    </section>
+  );
+}
 
 const API = 'http://localhost:5000/api';
 const CACHE_KEY = 'nexora-offline-snapshot-v2';
@@ -618,11 +692,9 @@ return (
 
       {page === 'overview' && <>
         <section className="hero-panel"><div className="hero-copy"><div className="live-label"><span className="pulse-dot" /> LIVE SERVICE MONITOR</div><h2>Resilience at the<br /><em>speed of the city.</em></h2><p>Detect. Diagnose. Recover. Verify. A safe simulation of autonomous service resilience across critical city systems.</p><div className="hero-foot"><span className={`status-badge ${overallStatus === 'OPERATIONAL' ? 'good' : overallStatus === 'DEGRADED' ? 'warn' : 'bad'}`}><i />{statusLabel(overallStatus)}</span><span className="hero-separator" /> <span>{healthyCount} of {services.length} services healthy</span></div></div><div className="hero-orbit"><div className="orbit orbit-one"/><div className="orbit orbit-two"/><div className="orbit-core"><span>NX</span><small>CORE</small></div><span className="orbit-node node-one">⚡</span><span className="orbit-node node-two">⌁</span><span className="orbit-node node-three">✚</span><span className="orbit-node node-four">↗</span></div><div className="hero-code">SYSTEM / HEALTHCHECK<br />AUTO-REMEDIATION: {healingEnabled ? 'ENABLED' : 'DISABLED'}<br />ENVIRONMENT: SIMULATED</div></section>
-        
 
         <section className="metric-grid overview-metric-grid">
           
-
 <Metric label="Service health" value={`${healthyCount}/${services.length || 0}`} note="Services currently healthy" icon="◈" /><Metric label="Tests executed" value={String(metrics.totalTests)} note="Stored in MongoDB" icon="ϟ" /><Metric label="Verified recoveries" value={String(metrics.recoveredCount)} note={`${metrics.recoveryRate}% of all tests`} icon="↻" /><Metric label="Detection failures" value={String(incidents.filter(i => i.status === 'DETECTION_FAILED').length)} note="Known monitor blind spots" icon="!" /><Metric label="Live health monitor" value={backendStatus !== 'ONLINE' ? 'OFFLINE' : monitorState.running ? 'RUNNING' : 'STARTING'} note={backendStatus !== 'ONLINE' ? 'Backend connection unavailable' : `${monitorState.totalChecks} checks · Last: ${monitorState.lastCheckAt ? new Date(monitorState.lastCheckAt).toLocaleTimeString() : 'Waiting'}`} icon="◷" /></section>
         <section className="section-heading"><div><div className="eyebrow">CITY INFRASTRUCTURE</div><h2>Service health</h2></div><button className="text-button" onClick={() => setPage('dependencies')}>View dependency map ↗</button></section>
         <section className="service-grid">{services.map(s => <ServiceCard key={s.id} service={s} onRecover={() => void recoverService(s.id)} disabled={backendStatus !== 'ONLINE'} />)}</section>
@@ -650,7 +722,6 @@ return (
         : 'AWAITING DATA'}
     </span>
   </div>
-
   {!healingResult ? (
     <div className="empty-state">
       <span>✳</span>
@@ -707,6 +778,12 @@ return (
         </div>
       </div>
 
+      <DataHealingFlowGraph
+  result={healingResult}
+  busy={healingBusy}
+  error={healingError}
+/>
+
       <div className="data-health-footer">
         <div>
           <strong>{healingResult.report.outputRecords}</strong>
@@ -727,14 +804,7 @@ return (
   )}
 </section>
 
-        <section className="backend-healing-dashboard">
-  <BackendHealingGraph
-    services={services}
-    incidents={incidents}
-  />
-</section>
 </>}
-
 
       {page === 'dependencies' && <>
         <section className="page-intro">
@@ -797,7 +867,14 @@ return (
         </div>
       </>}
 
-      {page === 'chaos' && <><section className="page-intro"><div className="eyebrow">CONTROLLED FAILURE INJECTION</div><h2>Chaos Lab</h2><p>Introduce a safe simulated fault. The backend records injection, detection, recovery action and health verification timestamps.</p></section><div className="chaos-layout"><div className="panel test-panel"><div className="panel-heading"><div><div className="eyebrow">TEST CONFIGURATION</div><h3>Configure failure</h3></div><span className="lab-icon">ϟ</span></div><label className="field-label" htmlFor="service-select">TARGET SERVICE</label><select id="service-select" value={selectedService} onChange={e => setSelectedService(e.target.value)} disabled={busy || backendStatus !== 'ONLINE'}>{services.map(s => <option key={s.id} value={s.id}>{s.name} — {s.category}</option>)}</select><label className="field-label" htmlFor="failure-select">FAILURE SCENARIO</label><select id="failure-select" value={selectedType} onChange={e => setSelectedType(e.target.value as FailureType)} disabled={busy || backendStatus !== 'ONLINE'}>{failureTypes.map(f => <option key={f.type} value={f.type}>{f.label}{f.autoRecoverable ? '' : ' — known limitation'}</option>)}{failureTypes.length === 0 && <option value="PROCESS_CRASH">Process Crash</option>}</select><div className="scenario-explain">{failureTypes.find(f => f.type === selectedType)?.description || 'Simulate a worker failure and attempt supervised recovery.'}</div>{selectedType === 'UNOBSERVABLE_FAULT' && <div className="warning-box"><strong>Expected limitation</strong><p>This test intentionally removes the monitor health signal. The expected outcome is DETECTION_FAILED, not successful automatic recovery.</p></div>}<div className="mode-row"><div><strong>Automatic healing</strong><small>{healingEnabled ? 'Recovery controller is enabled' : 'Healing OFF comparison run'}</small></div><span className={`mode-chip ${healingEnabled ? 'on' : 'off'}`}>{healingEnabled ? 'ON' : 'OFF'}</span></div><button className="primary-button run-button" disabled={backendStatus !== 'ONLINE' || busy || !services.length} onClick={() => void injectFailure()}>{busy ? <><span className="spinner"/> Running test…</> : <>Inject failure <span>→</span></>}</button><p className="safe-note">◉ Safe simulation only. This does not stop real utilities or kill the Express backend.</p></div><div className="panel test-guide"><div className="eyebrow">TEST LIFECYCLE</div><h3>What the system should do</h3><div className="lifecycle"><Lifecycle n="01" title="Inject" text="A controlled fault is introduced into the selected simulated service."/><Lifecycle n="02" title="Detect" text="The health monitor checks the service and records detection time."/><Lifecycle n="03" title="Diagnose & act" text="The recovery controller runs a type-specific action when healing is ON."/><Lifecycle n="04" title="Verify" text="A post-recovery health check decides RECOVERED or FAILED."/></div><div className="target-box"><span>PROJECT TARGET</span><strong>Under 30 seconds</strong><p>A target, not a guarantee. The dashboard records actual timings; no recovery time is invented.</p></div></div></div><section className="section-heading"><div><div className="eyebrow">RECENT TEST OUTPUT</div><h2>Latest test results</h2></div><button className="text-button" onClick={() => setPage('incidents')}>Incident history →</button></section><div className="panel">{incidents.length ? incidents.slice(0, 5).map(i => <IncidentRow key={i.incidentId} incident={i} />) : <EmptyState title="Awaiting first test" text="Select a service and scenario above to start." />}</div></>}
+      {page === 'chaos' && <><section className="page-intro"><div className="eyebrow">CONTROLLED FAILURE INJECTION</div><h2>Chaos Lab</h2><p>Introduce a safe simulated fault. The backend records injection, detection, recovery action and health verification timestamps.</p></section>
+<section className="backend-healing-dashboard">
+  <BackendHealingGraph
+    services={services}
+    incidents={incidents}
+  />
+</section>
+<div className="chaos-layout"><div className="panel test-panel"><div className="panel-heading"><div><div className="eyebrow">TEST CONFIGURATION</div><h3>Configure failure</h3></div><span className="lab-icon">ϟ</span></div><label className="field-label" htmlFor="service-select">TARGET SERVICE</label><select id="service-select" value={selectedService} onChange={e => setSelectedService(e.target.value)} disabled={busy || backendStatus !== 'ONLINE'}>{services.map(s => <option key={s.id} value={s.id}>{s.name} — {s.category}</option>)}</select><label className="field-label" htmlFor="failure-select">FAILURE SCENARIO</label><select id="failure-select" value={selectedType} onChange={e => setSelectedType(e.target.value as FailureType)} disabled={busy || backendStatus !== 'ONLINE'}>{failureTypes.map(f => <option key={f.type} value={f.type}>{f.label}{f.autoRecoverable ? '' : ' — known limitation'}</option>)}{failureTypes.length === 0 && <option value="PROCESS_CRASH">Process Crash</option>}</select><div className="scenario-explain">{failureTypes.find(f => f.type === selectedType)?.description || 'Simulate a worker failure and attempt supervised recovery.'}</div>{selectedType === 'UNOBSERVABLE_FAULT' && <div className="warning-box"><strong>Expected limitation</strong><p>This test intentionally removes the monitor health signal. The expected outcome is DETECTION_FAILED, not successful automatic recovery.</p></div>}<div className="mode-row"><div><strong>Automatic healing</strong><small>{healingEnabled ? 'Recovery controller is enabled' : 'Healing OFF comparison run'}</small></div><span className={`mode-chip ${healingEnabled ? 'on' : 'off'}`}>{healingEnabled ? 'ON' : 'OFF'}</span></div><button className="primary-button run-button" disabled={backendStatus !== 'ONLINE' || busy || !services.length} onClick={() => void injectFailure()}>{busy ? <><span className="spinner"/> Running test…</> : <>Inject failure <span>→</span></>}</button><p className="safe-note">◉ Safe simulation only. This does not stop real utilities or kill the Express backend.</p></div><div className="panel test-guide"><div className="eyebrow">TEST LIFECYCLE</div><h3>What the system should do</h3><div className="lifecycle"><Lifecycle n="01" title="Inject" text="A controlled fault is introduced into the selected simulated service."/><Lifecycle n="02" title="Detect" text="The health monitor checks the service and records detection time."/><Lifecycle n="03" title="Diagnose & act" text="The recovery controller runs a type-specific action when healing is ON."/><Lifecycle n="04" title="Verify" text="A post-recovery health check decides RECOVERED or FAILED."/></div><div className="target-box"><span>PROJECT TARGET</span><strong>Under 30 seconds</strong><p>A target, not a guarantee. The dashboard records actual timings; no recovery time is invented.</p></div></div></div><section className="section-heading"><div><div className="eyebrow">RECENT TEST OUTPUT</div><h2>Latest test results</h2></div><button className="text-button" onClick={() => setPage('incidents')}>Incident history →</button></section><div className="panel">{incidents.length ? incidents.slice(0, 5).map(i => <IncidentRow key={i.incidentId} incident={i} />) : <EmptyState title="Awaiting first test" text="Select a service and scenario above to start." />}</div></>}
         
 {page === 'data-healing' && <>
   <section className="page-intro">
@@ -836,6 +913,7 @@ return (
     {healingBusy && <p className="healing-message">Processing and checking records…</p>}
     {healingError && <div className="error-banner">{healingError}</div>}
   </section>
+
 
   {healingResult && <>
     <section className="metric-grid healing-metrics">
