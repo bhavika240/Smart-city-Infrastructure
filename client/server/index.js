@@ -23,7 +23,7 @@ const PORT = Number(process.env.PORT) || 5000;
 const MONGO_URI =
   process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/phoenix';
 
-app.use(cors());
+app.use(cors({ origin: process.env.CORS_ORIGIN || true }));
 app.use(express.json({ limit: '100kb' }));
 
 app.get('/api/rate-limit-test', overloadLimiter, (req, res) => {
@@ -64,6 +64,8 @@ function healCsvRows(rows) {
     repairedValues: 0,
     needsReview: 0,
     removedRecords: 0,
+    outliersDetected: 0,
+    outliersFlagged: 0,
   };
 
   const numericFields = [
@@ -115,6 +117,55 @@ function healCsvRows(rows) {
         : (values[middle - 1] + values[middle]) / 2;
     }
   }
+  
+  // Detect statistical outliers using the IQR method.
+  // Outliers are flagged for review, not automatically overwritten.
+  const outlierBounds = {};
+
+  for (const key of numericKeys) {
+    const field = key.toLowerCase();
+    const [min, max] = validRanges[field];
+
+    const values = rows
+      .map((row) => {
+        const raw = String(row[key] ?? '').trim();
+        return raw === '' ? NaN : Number(raw);
+      })
+      .filter(
+        (value) =>
+          Number.isFinite(value) &&
+          value >= min &&
+          value <= max
+      )
+      .sort((a, b) => a - b);
+
+    if (values.length < 4) continue;
+
+    const percentile = (arr, p) => {
+      const index = (arr.length - 1) * p;
+      const lower = Math.floor(index);
+      const upper = Math.ceil(index);
+
+      if (lower === upper) return arr[lower];
+
+      return (
+        arr[lower] * (upper - index) +
+        arr[upper] * (index - lower)
+      );
+    };
+
+    const q1 = percentile(values, 0.25);
+    const q3 = percentile(values, 0.75);
+    const iqr = q3 - q1;
+
+    // If all values are identical, there is no useful IQR signal.
+    if (iqr === 0) continue;
+
+    outlierBounds[key] = {
+      lower: Math.max(min, q1 - 1.5 * iqr),
+      upper: Math.min(max, q3 + 1.5 * iqr),
+    };
+  }
 
   const seen = new Set();
   const cleanedRows = [];
@@ -148,7 +199,20 @@ function healCsvRows(rows) {
 
       if (missing) report.missingValues++;
       if (invalid) report.invalidValues++;
+      
+      const bounds = outlierBounds[key];
 
+      const isOutlier =
+        !missing &&
+        !invalid &&
+        bounds &&
+        (value < bounds.lower || value > bounds.upper);
+
+      if (isOutlier) {
+        report.outliersDetected++;
+        report.outliersFlagged++;
+        needsReview = true;
+      }
       if (missing || invalid) {
         if (medians[key] !== undefined) {
           row[key] = String(medians[key]);
@@ -250,7 +314,7 @@ await DataHealingEvent.create({
         eventId,
         eventStatus,
         message: 'CSV analysis completed.',
-        healingMode: 'Conservative: uncertain values are flagged, not guessed.',
+        healingMode: 'Missing and out-of-range numeric values are replaced with the column median. Values that cannot be repaired are flagged for review.',
         report: result.report,
         downloadUrl: `/api/data-healing/download/${outputName}`,
         preview: {

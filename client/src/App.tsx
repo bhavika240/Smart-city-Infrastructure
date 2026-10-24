@@ -466,7 +466,8 @@ function DataHealingFlowGraph({
   );
 }
 
-const API = 'http://localhost:5000/api';
+const API_BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:5000';
+const API = `${API_BASE}/api`;
 const CACHE_KEY = 'nexora-offline-snapshot-v2';
 const navItems = [
   { id: 'overview', label: 'Overview', icon: '◫' },
@@ -561,7 +562,10 @@ setError('');
   const healthyCount = services.filter(s => s.status === 'HEALTHY').length;
   const overallStatus = services.length === 0 ? 'UNKNOWN' : services.some(s => s.status === 'FAILED') ? 'CRITICAL' : services.some(s => s.status === 'DEGRADED') ? 'DEGRADED' : 'OPERATIONAL';
   const filteredIncidents = useMemo(() => incidents.filter(i => `${i.serviceName} ${i.type} ${i.status} ${i.diagnosis}`.toLowerCase().includes(search.toLowerCase())), [incidents, search]);
-  
+  const displayOrder = ['powergrid', 'aquaflow', 'citylink', 'medicore'];
+const orderedServices = [...services].sort(
+  (a, b) => displayOrder.indexOf(a.id) - displayOrder.indexOf(b.id)
+);
   const dependencyLinks = [
     { source: 'powergrid', target: 'aquaflow' },
     { source: 'citylink', target: 'medicore' },
@@ -823,7 +827,7 @@ return (
             <strong>Monitoring<br />Controller</strong>
             <small>HEALTH PROBES</small>
           </div>
-          {services.map((s, index) => (
+          {orderedServices.map((s, index) => (
             <div className={`dependency-node dep-${index}`} key={s.id}>
               <div className={`dep-icon ${s.status.toLowerCase()}`}>
                 {['ϟ', '≈', '⌁', '✚'][index]}
