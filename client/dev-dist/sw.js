@@ -81,14 +81,18 @@ define(['./workbox-d3a36d94'], (function (workbox) { 'use strict';
     "revision": "3ca0b8505b4bec776b69afdba2768812"
   }, {
     "url": "index.html",
-    "revision": "0.v7lss6knsgo"
+    "revision": "0.pkporgdst1"
   }], {});
   workbox.cleanupOutdatedCaches();
   workbox.registerRoute(new workbox.NavigationRoute(workbox.createHandlerBoundToURL("index.html"), {
     allowlist: [/^\/$/]
   }));
-  workbox.registerRoute(/^https?:\/\/(localhost|127\.0\.0\.1):5000\/api\/health$/, new workbox.NetworkOnly(), 'GET');
-  workbox.registerRoute(/^https?:\/\/(localhost|127\.0\.0\.1):5000\/api\/.*$/, new workbox.NetworkFirst({
+  workbox.registerRoute(({
+    url
+  }) => url.pathname === "/api/health", new workbox.NetworkOnly(), 'GET');
+  workbox.registerRoute(({
+    url
+  }) => url.pathname.startsWith("/api/"), new workbox.NetworkFirst({
     "cacheName": "nexora-api-cache",
     "networkTimeoutSeconds": 3,
     plugins: [new workbox.ExpirationPlugin({

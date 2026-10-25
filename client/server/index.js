@@ -169,18 +169,26 @@ function healCsvRows(rows) {
 
   const seen = new Set();
   const cleanedRows = [];
+  const changes = [];
 
   for (const original of rows) {
     const row = { ...original };
     let changed = false;
     let needsReview = false;
+    const recordId = original[fieldNames[0]] ?? '';
     const fingerprint = JSON.stringify(
       Object.keys(row).sort().map((key) => [key, row[key]])
     );
 
-    if (seen.has(fingerprint)) {
+       if (seen.has(fingerprint)) {
       report.duplicateRecords++;
       report.removedRecords++;
+      if (changes.length < 200) {
+        changes.push({
+          recordId, column: '(row)', before: 'duplicate', after: 'removed',
+          action: 'REMOVED', reason: 'Exact duplicate record',
+        });
+      }
       continue;
     }
 
@@ -208,19 +216,40 @@ function healCsvRows(rows) {
         bounds &&
         (value < bounds.lower || value > bounds.upper);
 
-      if (isOutlier) {
-        report.outliersDetected++;
-        report.outliersFlagged++;
-        needsReview = true;
-      }
+    if (isOutlier) {
+  report.outliersDetected++;
+  report.outliersFlagged++;
+  needsReview = true;
+  if (changes.length < 200) {
+    changes.push({
+      recordId, column: key, before: raw, after: raw,
+      action: 'FLAGGED', reason: 'Statistical outlier (IQR); kept for review',
+    });
+  }
+}
       if (missing || invalid) {
         if (medians[key] !== undefined) {
-          row[key] = String(medians[key]);
-          report.repairedValues++;
-          changed = true;
-        } else {
-          needsReview = true;
-        }
+  row[key] = String(medians[key]);
+  report.repairedValues++;
+  changed = true;
+  if (changes.length < 200) {
+    changes.push({
+      recordId, column: key, before: raw, after: row[key],
+      action: 'REPAIRED',
+      reason: missing
+        ? 'Missing value replaced with column median'
+        : 'Invalid or out-of-range value replaced with column median',
+    });
+  }
+} else {
+  needsReview = true;
+  if (changes.length < 200) {
+    changes.push({
+      recordId, column: key, before: raw, after: raw,
+      action: 'FLAGGED', reason: 'No valid values to compute a median',
+    });
+  }
+}
       }
     }
 
@@ -242,6 +271,7 @@ function healCsvRows(rows) {
 
   return {
     rows: cleanedRows,
+    changes,
     report: {
       ...report,
       outputRecords: cleanedRows.length,
@@ -316,6 +346,7 @@ await DataHealingEvent.create({
         message: 'CSV analysis completed.',
         healingMode: 'Missing and out-of-range numeric values are replaced with the column median. Values that cannot be repaired are flagged for review.',
         report: result.report,
+        changes: result.changes,
         downloadUrl: `/api/data-healing/download/${outputName}`,
         preview: {
   original: originalPreview,
