@@ -367,6 +367,7 @@ function BackendHealingGraph({
     </section>
   );
 }
+
 type HealingChange = {
   recordId: string;
   column: string;
@@ -375,6 +376,37 @@ type HealingChange = {
   action: 'REPAIRED' | 'FLAGGED' | 'REMOVED';
   reason: string;
 };
+
+type ZoneCell = {
+  state: 'HEALTHY' | 'ANOMALY' | 'DEGRADED' | 'FAILED';
+  reason: string | null;
+};
+type ZoneInfo = {
+  zone: number;
+  name: string;
+  overall: ZoneCell['state'];
+  cells: Record<string, ZoneCell>;
+};
+type AnomalyEvent = {
+  at: string;
+  serviceId: string;
+  zone: number;
+  recordId: string;
+  reason: string;
+};
+type Telemetry = {
+  source: string;
+  zones: ZoneInfo[];
+  series: Record<string, { history: number[]; anomalyCount: number }>;
+  recentAnomalies: AnomalyEvent[];
+};
+type DemoOutcome = {
+  healing: boolean;
+  incident: Incident | null;
+  powergrid: string;
+  aquaflow: string;
+};
+
 type HealingReport = {
   totalRecords: number;
   missingValues: number;
@@ -480,6 +512,7 @@ const API = `${API_BASE}/api`;
 const CACHE_KEY = 'nexora-offline-snapshot-v2';
 const navItems = [
   { id: 'overview', label: 'Overview', icon: '◫' },
+  { id: 'zones', label: 'City Zone Map', icon: '▦' },
   { id: 'dependencies', label: 'Dependency Map', icon: '⌘' },
   { id: 'chaos', label: 'Chaos Lab', icon: 'ϟ' },
   { id: 'data-healing', label: 'Data Healing', icon: '✳' },
@@ -525,6 +558,10 @@ useEffect(() => {
   const [selectedService, setSelectedService] = useState('powergrid');
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
+  const [telemetry, setTelemetry] = useState<Telemetry | null>(null);
+  const [demoBusy, setDemoBusy] = useState(false);
+  const [demoStep, setDemoStep] = useState('');
+  const [demoRuns, setDemoRuns] = useState<DemoOutcome[]>([]);
 
   useEffect(() => {
   if (!notice) return;
@@ -544,15 +581,15 @@ const [healingError, setHealingError] = useState('');
 
   const refresh = useCallback(async () => {
     try {
-      const endpoints = await Promise.all(['/services', '/incidents', '/metrics', '/failure-types', '/health', '/monitor', '/risk-scores'].map(path =>fetch(`${API}${path}`, {
+      const endpoints = await Promise.all(['/services', '/incidents', '/metrics', '/failure-types', '/health', '/monitor', '/risk-scores', '/telemetry'].map(path =>fetch(`${API}${path}`, {
   cache: 'no-store',
   signal: AbortSignal.timeout(8000)
 })));
       if (endpoints.some(response => !response.ok)) throw new Error('One or more API requests failed.');
-      const [s, i, m, f, _health, monitor, _risk] = await Promise.all(endpoints.map(response => response.json()));
+      const [s, i, m, f, _health, monitor, _risk, telem] = await Promise.all(endpoints.map(response => response.json()));
       const syncTime = new Date().toISOString();
       const snapshot = { services: s.services as Service[], incidents: i.incidents as Incident[], metrics: m as Metrics, failureTypes: f.failureTypes as FailureOption[], healingEnabled: Boolean(s.healingEnabled), savedAt: syncTime };
-      setServices(snapshot.services); setIncidents(snapshot.incidents); setMetrics(snapshot.metrics); setFailureTypes(snapshot.failureTypes); setHealingEnabled(snapshot.healingEnabled); setMonitorState(monitor as MonitorState);
+      setServices(snapshot.services); setIncidents(snapshot.incidents); setMetrics(snapshot.metrics); setFailureTypes(snapshot.failureTypes); setHealingEnabled(snapshot.healingEnabled); setMonitorState(monitor as MonitorState); setTelemetry(telem as Telemetry);
       setBackendStatus('ONLINE');
 setLastSynced(syncTime);
 localStorage.setItem(CACHE_KEY, JSON.stringify(snapshot));
@@ -566,7 +603,7 @@ setError('');
 
   useEffect(() => {
     void refresh();
-   const interval = window.setInterval(() => void refresh(), 5000);
+   const interval = window.setInterval(() => void refresh(), 3000);
     const online = () => { setBackendStatus('CONNECTING'); void refresh(); };
     const offline = () => setBackendStatus('OFFLINE');
     window.addEventListener('online', online); window.addEventListener('offline', offline);
@@ -574,6 +611,8 @@ setError('');
   }, [refresh]);
 
   const healthyCount = services.filter(s => s.status === 'HEALTHY').length;
+  const detectionTimes = incidents.map(i => i.detectionMs).filter((v): v is number => typeof v === 'number');
+  const meanDetectionMs = detectionTimes.length ? Math.round(detectionTimes.reduce((sum, v) => sum + v, 0) / detectionTimes.length) : null;
   const overallStatus = services.length === 0 ? 'UNKNOWN' : services.some(s => s.status === 'FAILED') ? 'CRITICAL' : services.some(s => s.status === 'DEGRADED') ? 'DEGRADED' : 'OPERATIONAL';
   const filteredIncidents = useMemo(() => incidents.filter(i => `${i.serviceName} ${i.type} ${i.status} ${i.diagnosis}`.toLowerCase().includes(search.toLowerCase())), [incidents, search]);
   const displayOrder = ['powergrid', 'aquaflow', 'citylink', 'medicore'];
@@ -628,9 +667,9 @@ async function uploadHealingFile(file: File) {
       throw new Error(data.message || 'CSV upload failed.');
     }
 
-   const downloadUrl = data.downloadUrl.startsWith('http')
-  ? data.downloadUrl
-  : `${API_BASE}${data.downloadUrl}`;
+    const downloadUrl = data.downloadUrl.startsWith('http')
+      ? data.downloadUrl
+      : `${API_BASE}${data.downloadUrl}`;
 
     setHealingResult({
       ...data,
@@ -649,7 +688,7 @@ async function uploadHealingFile(file: File) {
     const response = await fetch(`${API}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.message || `Request failed (${response.status})`);
-    return data as { message?: string; healingEnabled?: boolean };
+    return data as { message?: string; healingEnabled?: boolean; incidentId?: string };
   }
   async function injectFailure() {
     if (backendStatus !== 'ONLINE' || busy) return;
@@ -660,6 +699,7 @@ async function uploadHealingFile(file: File) {
       await refresh();
       window.setTimeout(() => { void refresh(); }, 1800);
       window.setTimeout(() => { void refresh(); }, 3200);
+      window.setTimeout(() => { void refresh(); }, 5200);
     } catch (e) { setError(e instanceof Error ? e.message : 'Could not run the failure test.'); }
     finally { window.setTimeout(() => setBusy(false), 1000); }
   }
@@ -678,6 +718,50 @@ async function uploadHealingFile(file: File) {
     try { const result = await apiPost(`/recovery/${serviceId}`); setNotice(result.message || 'Health check finished.'); await refresh(); }
     catch (e) { setError(e instanceof Error ? e.message : 'Recovery request failed.'); }
   }
+async function runComparisonDemo() {
+  if (backendStatus !== 'ONLINE' || demoBusy) return;
+  const originalHealing = healingEnabled;
+  const outcomes: DemoOutcome[] = [];
+  setDemoBusy(true); setDemoRuns([]); setError(''); setNotice('');
+  try {
+    for (const enabled of [false, true]) {
+      const label = enabled ? 'Healing ON' : 'Healing OFF';
+      setDemoStep(`${label}: resetting PowerGrid…`);
+      await apiPost('/recovery/powergrid');
+      await apiPost('/healing', { enabled });
+      setDemoStep(`${label}: crashing PowerGrid…`);
+      const injected = await apiPost('/failures/powergrid', { type: 'PROCESS_CRASH' });
+      setDemoStep(`${label}: waiting for the monitor…`);
+      let incident: Incident | null = null;
+      const deadline = Date.now() + 20000;
+      while (Date.now() < deadline) {
+        const data = await fetchJson('/incidents');
+        incident = (data.incidents as Incident[]).find(item => item.incidentId === injected.incidentId) ?? null;
+        if (incident && !['INJECTED', 'RECOVERING'].includes(incident.status)) break;
+        await sleep(500);
+      }
+      const data = await fetchJson('/services');
+      const stateOf = (id: string) => (data.services as Service[]).find(x => x.id === id)?.status ?? 'UNKNOWN';
+      outcomes.push({ healing: enabled, incident, powergrid: stateOf('powergrid'), aquaflow: stateOf('aquaflow') });
+      setDemoRuns([...outcomes]);
+    }
+    setNotice('Demo finished: compare the Healing OFF and ON columns.');
+  } catch (e) {
+    setError(e instanceof Error ? e.message : 'The demo could not finish.');
+  } finally {
+    try {
+      await apiPost('/recovery/powergrid');
+      await apiPost('/healing', { enabled: originalHealing });
+    } catch { /* best effort: the user can reset manually */ }
+    setDemoStep('');
+    setDemoBusy(false);
+    await refresh();
+  }
+}
+const demoOff = demoRuns.find(run => !run.healing);
+const demoOn = demoRuns.find(run => run.healing);
+const demoCell = (run: DemoOutcome | undefined, pick: (run: DemoOutcome) => string) => run ? pick(run) : '…';
+
 return (
   <div className={`app-shell theme-${theme}`}>
     <aside className="sidebar">
@@ -686,11 +770,11 @@ return (
       <nav>{navItems.map(item => <button key={item.id} className={`nav-item ${page === item.id ? 'active' : ''}`} onClick={() => setPage(item.id)}><span className="nav-icon">{item.icon}</span><span>{item.label}</span>{page === item.id && <i />}</button>)}</nav>
       <div className="sidebar-spacer" />
       <div className="healing-card"><div className="healing-top"><span className="pulse-dot" /><span>SELF-HEALING</span></div><strong>{healingEnabled ? 'Automatic mode ON' : 'Manual test mode'}</strong><p>{healingEnabled ? 'Supported failures are handled automatically.' : 'Faults are logged without automatic recovery.'}</p><button className="subtle-button" disabled={backendStatus !== 'ONLINE'} onClick={() => void toggleHealing()}>{healingEnabled ? 'Disable healing' : 'Enable healing'}</button></div>
-      <div className="side-footer"><span className={`connection-dot ${backendStatus.toLowerCase()}`} />{backendStatus === 'ONLINE' ? 'API connected' : backendStatus === 'OFFLINE' ? 'API offline' : 'Connecting to API'}<small>PHOENIX · DEMO ENVIRONMENT</small></div>
+      <div className="side-footer"><span className={`connection-dot ${backendStatus.toLowerCase()}`} />{backendStatus === 'ONLINE' ? 'API connected' : backendStatus === 'OFFLINE' ? 'API offline' : 'Connecting to API'}<small>NEXORA · DEMO ENVIRONMENT</small></div>
     </aside>
 
     <main className="main-area">
-      <header className="topbar"><div><div className="eyebrow">PHOENIX RESILIENCE PROJECT</div><h1>{navItems.find(n => n.id === page)?.label}</h1></div><div className="top-actions"><div className={`api-pill ${backendStatus.toLowerCase()}`}><span />{backendStatus === 'ONLINE' ? 'API: ONLINE' : backendStatus === 'OFFLINE' ? 'API: OFFLINE' : 'API: CONNECTING'}</div><div className="avatar">NX</div><button
+      <header className="topbar"><div><div className="eyebrow">NEXORA RESILIENCE PROJECT</div><h1>{navItems.find(n => n.id === page)?.label}</h1></div><div className="top-actions"><div className={`api-pill ${backendStatus.toLowerCase()}`}><span />{backendStatus === 'ONLINE' ? 'API: ONLINE' : backendStatus === 'OFFLINE' ? 'API: OFFLINE' : 'API: CONNECTING'}</div><div className="avatar">NX</div><button
   className="theme-toggle"
   onClick={() =>
     setTheme(current =>
@@ -715,7 +799,7 @@ return (
           
 <Metric label="Service health" value={`${healthyCount}/${services.length || 0}`} note="Services currently healthy" icon="◈" /><Metric label="Tests executed" value={String(metrics.totalTests)} note="Stored in MongoDB" icon="ϟ" /><Metric label="Verified recoveries" value={String(metrics.recoveredCount)} note={`${metrics.recoveryRate}% of all tests`} icon="↻" /><Metric label="Detection failures" value={String(incidents.filter(i => i.status === 'DETECTION_FAILED').length)} note="Known monitor blind spots" icon="!" /><Metric label="Live health monitor" value={backendStatus !== 'ONLINE' ? 'OFFLINE' : monitorState.running ? 'RUNNING' : 'STARTING'} note={backendStatus !== 'ONLINE' ? 'Backend connection unavailable' : `${monitorState.totalChecks} checks · Last: ${monitorState.lastCheckAt ? new Date(monitorState.lastCheckAt).toLocaleTimeString() : 'Waiting'}`} icon="◷" /></section>
         <section className="section-heading"><div><div className="eyebrow">CITY INFRASTRUCTURE</div><h2>Service health</h2></div><button className="text-button" onClick={() => setPage('dependencies')}>View dependency map ↗</button></section>
-        <section className="service-grid">{services.map(s => <ServiceCard key={s.id} service={s} onRecover={() => void recoverService(s.id)} disabled={backendStatus !== 'ONLINE'} />)}</section>
+        <section className="service-grid">{services.map(s => <ServiceCard key={s.id} service={s} onRecover={() => void recoverService(s.id)} disabled={backendStatus !== 'ONLINE'} history={telemetry?.series[s.id]?.history} />)}</section>
 
         <section className="lower-grid"><div className="panel"><div className="panel-heading"><div><div className="eyebrow">LATEST EVENTS</div><h3>Recent incidents</h3></div><button className="text-button" onClick={() => setPage('incidents')}>View all →</button></div>{incidents.length ? incidents.slice(0, 4).map(i => <IncidentRow key={i.incidentId} incident={i} />) : <EmptyState title="No incidents yet" text="Run a failure scenario in Chaos Lab to create your first event." />}</div><div className="panel quick-panel"><div className="eyebrow">QUICK ACTION</div><h3>Run a resilience test</h3><p>Trigger a controlled fault and watch the system detect, attempt recovery and verify health.</p><button className="primary-button" disabled={backendStatus !== 'ONLINE'} onClick={() => setPage('chaos')}>Open Chaos Lab <span>↗</span></button><div className="quick-stats"><div><strong>{duration(metrics.averageTotalRecoveryMs)}</strong><span>AVG TOTAL RECOVERY</span></div><div><strong>{metrics.detectionRate}%</strong><span>DETECTION RATE*</span></div></div><small className="fine-print">*Includes monitor timeout tests in the total.</small></div></section>
 
@@ -823,6 +907,42 @@ return (
 </section>
 
 </>}
+
+      {page === 'zones' && <>
+        <section className="page-intro">
+          <div className="eyebrow">LIVE CITY VIEW</div>
+          <h2>City zone map</h2>
+          <p>Each tile is a city zone. Readings are streamed from the demo datasets (10 rows per monitor cycle) and validated live. A service fault colours every zone it affects.</p>
+        </section>
+        <div className="zone-legend">
+          <span><i className="cell-healthy" />Healthy</span>
+          <span><i className="cell-anomaly" />Bad reading in stream</span>
+          <span><i className="cell-degraded" />Service degraded</span>
+          <span><i className="cell-failed" />Service failed</span>
+        </div>
+        {telemetry && telemetry.zones.length > 0 ? <section className="zone-grid">
+          {telemetry.zones.map(zone => (
+            <article key={zone.zone} className={`zone-tile zone-${zone.overall.toLowerCase()}`}>
+              <header><strong>{zone.name}</strong><span className="zone-state">{statusLabel(zone.overall)}</span></header>
+              <div className="zone-cells">
+                {orderedServices.map(service => {
+                  const cell = zone.cells[service.id];
+                  return <span key={service.id} className={`zone-cell cell-${(cell?.state ?? 'HEALTHY').toLowerCase()}`} title={cell?.reason ? `${service.name}: ${cell.reason}` : `${service.name}: healthy`}>{serviceSymbol(service.name)}</span>;
+                })}
+              </div>
+            </article>
+          ))}
+        </section> : <div className="panel"><EmptyState title="Waiting for telemetry" text="Start the backend and keep this page open. Zones appear after the first monitor cycle." /></div>}
+        <div className="panel zone-feed">
+          <div className="eyebrow">DATA STREAM</div>
+          <h3>Recent bad readings caught by the monitor</h3>
+          {telemetry && telemetry.recentAnomalies.length > 0 ? <ul className="report-list">
+            {telemetry.recentAnomalies.slice(0, 8).map((event, index) => (
+              <li key={`${event.at}-${index}`}><strong>{event.recordId} · Zone-{event.zone}</strong><span>{event.reason} · {new Date(event.at).toLocaleTimeString()}</span></li>
+            ))}
+          </ul> : <p>No bad readings yet. The datasets contain planted faults (missing, invalid and out-of-range values) that appear as the stream advances.</p>}
+        </div>
+      </>}
 
       {page === 'dependencies' && <>
         <section className="page-intro">
@@ -959,33 +1079,33 @@ return (
         <div><span>Output records</span><strong>{healingResult.report.outputRecords}</strong></div>
         <div><span>Repaired records</span><strong>{healingResult.report.repairedRecords}</strong></div>
       </div>
-        {healingResult.changes && healingResult.changes.length > 0 && (
-  <div className="healing-preview">
-    <h3>Changes made ({healingResult.changes.length}{healingResult.changes.length >= 200 ? '+' : ''})</h3>
-    <p>Every repaired, flagged or removed value is listed here.</p>
-    <div className="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Record</th><th>Column</th><th>Before</th><th>After</th><th>Action</th><th>Reason</th>
-          </tr>
-        </thead>
-        <tbody>
-          {healingResult.changes.map((c, index) => (
-            <tr key={index}>
-              <td>{c.recordId || '—'}</td>
-              <td>{c.column}</td>
-              <td>{c.before === '' ? '(empty)' : c.before}</td>
-              <td><strong>{c.after}</strong></td>
-              <td><span style={{ color: actionColors[c.action], fontWeight: 600 }}>{c.action}</span></td>
-              <td>{c.reason}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  </div>
-)}
+
+      {healingResult.changes && healingResult.changes.length > 0 && (
+        <div className="healing-preview">
+          <h3>Changes made ({healingResult.changes.length}{healingResult.changes.length >= 200 ? '+' : ''})</h3>
+          <p>Every repaired, flagged or removed value is listed here{healingResult.changes.length >= 200 ? ' (first 200 shown)' : ''}.</p>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr><th>Record</th><th>Column</th><th>Before</th><th>After</th><th>Action</th><th>Reason</th></tr>
+              </thead>
+              <tbody>
+                {healingResult.changes.map((c, index) => (
+                  <tr key={index}>
+                    <td>{c.recordId || '—'}</td>
+                    <td>{c.column}</td>
+                    <td>{c.before === '' ? '(empty)' : c.before}</td>
+                    <td><strong>{c.after}</strong></td>
+                    <td><span style={{ color: actionColors[c.action], fontWeight: 600 }}>{c.action}</span></td>
+                    <td>{c.reason}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
       {healingResult.preview && (
         <div className="healing-preview">
           <h3>Before and after preview</h3>
@@ -1104,35 +1224,6 @@ return (
 </tbody></table></div>{filteredIncidents.length === 0 && <EmptyState title="No matching incidents" text="Try a different search or run a test in Chaos Lab." />}</div><button className="danger-quiet" disabled={backendStatus !== 'ONLINE' || busy} onClick={() => void resetDemo()}>Reset demo data & clear incident history</button></>}
 
       {page === 'reliability' && <>
-   <section className="metric-grid">
-  <Metric
-    label="Detection rate"
-    value={`${metrics.detectionRate}%`}
-    note="Recorded detection outcomes"
-    icon="◎"
-  />
-
-  <Metric
-    label="Verified recovery rate"
-    value={`${metrics.recoveryRate}%`}
-    note="Passed recovery verification"
-    icon="✓"
-  />
-
-  <Metric
-    label="Average total recovery"
-    value={duration(metrics.averageTotalRecoveryMs)}
-    note="Injection to verified recovery"
-    icon="◷"
-  />
-
-  <Metric
-    label="Failed outcomes"
-    value={String(metrics.failedCount)}
-    note="Includes detection timeouts"
-    icon="!"
-  />
-</section>
 {healingResult && (
   <section className="panel healing-report-panel">
     <div className="eyebrow">LATEST DATA HEALING RUN</div>
@@ -1166,24 +1257,56 @@ return (
     </button>
   </section>
 )}
-<section className="page-intro"><div className="eyebrow">MEASURED RESILIENCE</div><h2>Reliability report</h2><p>Metrics are calculated from persisted test results. Run tests with healing ON and OFF for a useful comparison.</p></section><section className="metric-grid"><Metric label="Detection rate" value={`${metrics.detectionRate}%`} note={`${metrics.detectedCount} recorded detection outcomes`} icon="⌁" /><Metric label="Verified recovery rate" value={`${metrics.recoveryRate}%`} note={`${metrics.recoveredCount} passed verification`} icon="↻" /><Metric label="Average total recovery" value={duration(metrics.averageTotalRecoveryMs)} note="Injection to verified recovery" icon="◷" /><Metric label="Failed outcomes" value={String(metrics.failedCount)} note="Includes detection timeouts" icon="!" /></section><div className="reliability-grid"><div className="panel"><div className="eyebrow">OUTCOME BREAKDOWN</div><h3>Recorded tests</h3><div className="bar-metric"><div><span>Verified recovered</span><strong>{metrics.recoveredCount}</strong></div><div className="bar-track"><i className="bar-green" style={{ width: `${metrics.totalTests ? metrics.recoveredCount / metrics.totalTests * 100 : 0}%` }} /></div></div><div className="bar-metric"><div><span>Detected but not recovered</span><strong>{incidents.filter(i => i.status === 'FAILED').length}</strong></div><div className="bar-track"><i className="bar-amber" style={{ width: `${metrics.totalTests ? incidents.filter(i => i.status === 'FAILED').length / metrics.totalTests * 100 : 0}%` }} /></div></div><div className="bar-metric"><div><span>Detection failed</span><strong>{incidents.filter(i => i.status === 'DETECTION_FAILED').length}</strong></div><div className="bar-track"><i className="bar-red" style={{ width: `${metrics.totalTests ? incidents.filter(i => i.status === 'DETECTION_FAILED').length / metrics.totalTests * 100 : 0}%` }} /></div></div></div><div className="panel"><div className="eyebrow">INTERPRETATION</div><h3>What the data means</h3><ul className="report-list"><li><strong>RECOVERED</strong><span>Health verification passed after automated action.</span></li><li><strong>FAILED</strong><span>Fault was observed but no successful verified recovery was recorded.</span></li><li><strong>DETECTION_FAILED</strong><span>Monitor lacked a usable signal; this is a known limitation, not a successful detection.</span></li></ul><div className="warning-box"><strong>Evidence integrity</strong><p>Do not claim every failure heals. Keep Healing OFF and ON runs, actual timestamps and unresolved outcomes in your report.</p></div></div></div><div className="note-panel"><strong>How to compare Healing OFF vs ON</strong><p>Run the same service and failure type once with healing disabled, then again with healing enabled. Compare the recorded status and timing for each run. Reset clears all incident records, so export or capture your evidence first.</p><button className="outline-button" onClick={() => setPage('chaos')}>Run comparison tests ↗</button></div></>}
-      <footer className="page-footer"><span>© NEXORA · PROJECT PHOENIX</span><span>SIMULATED ENVIRONMENT · NOT FOR REAL INFRASTRUCTURE CONTROL</span></footer>
+<section className="page-intro"><div className="eyebrow">MEASURED RESILIENCE</div><h2>Reliability report</h2><p>Metrics are calculated from persisted test results. Run tests with healing ON and OFF for a useful comparison.</p></section><section className="metric-grid"><Metric label="Detection rate" value={`${metrics.detectionRate}%`} note={`${metrics.detectedCount} recorded detection outcomes`} icon="⌁" /><Metric label="Verified recovery rate" value={`${metrics.recoveryRate}%`} note={`${metrics.recoveredCount} passed verification`} icon="↻" /><Metric label="Average total recovery" value={duration(metrics.averageTotalRecoveryMs)} note="Injection to verified recovery" icon="◷" /><Metric label="Failed outcomes" value={String(metrics.failedCount)} note="Includes detection timeouts" icon="!" /><Metric label="Mean time to detect" value={duration(meanDetectionMs)} note="Injection to monitor detection" icon="◎" /></section><div className="reliability-grid"><div className="panel"><div className="eyebrow">OUTCOME BREAKDOWN</div><h3>Recorded tests</h3><div className="bar-metric"><div><span>Verified recovered</span><strong>{metrics.recoveredCount}</strong></div><div className="bar-track"><i className="bar-green" style={{ width: `${metrics.totalTests ? metrics.recoveredCount / metrics.totalTests * 100 : 0}%` }} /></div></div><div className="bar-metric"><div><span>Detected but not recovered</span><strong>{incidents.filter(i => i.status === 'FAILED').length}</strong></div><div className="bar-track"><i className="bar-amber" style={{ width: `${metrics.totalTests ? incidents.filter(i => i.status === 'FAILED').length / metrics.totalTests * 100 : 0}%` }} /></div></div><div className="bar-metric"><div><span>Detection failed</span><strong>{incidents.filter(i => i.status === 'DETECTION_FAILED').length}</strong></div><div className="bar-track"><i className="bar-red" style={{ width: `${metrics.totalTests ? incidents.filter(i => i.status === 'DETECTION_FAILED').length / metrics.totalTests * 100 : 0}%` }} /></div></div></div><div className="panel"><div className="eyebrow">INTERPRETATION</div><h3>What the data means</h3><ul className="report-list"><li><strong>RECOVERED</strong><span>Health verification passed after automated action.</span></li><li><strong>FAILED</strong><span>Fault was observed but no successful verified recovery was recorded.</span></li><li><strong>DETECTION_FAILED</strong><span>Monitor lacked a usable signal; this is a known limitation, not a successful detection.</span></li></ul><div className="warning-box"><strong>Evidence integrity</strong><p>Do not claim every failure heals. Keep Healing OFF and ON runs, actual timestamps and unresolved outcomes in your report.</p></div></div></div><section className="panel demo-panel">
+  <div className="panel-heading"><div><div className="eyebrow">ONE-CLICK DEMO</div><h3>Healing OFF vs ON</h3></div><span className="lab-icon">▶</span></div>
+  <p>Crashes PowerGrid twice, once with automatic healing disabled and once enabled, and compares what the live monitor measured. AquaFlow depends on PowerGrid, so the cascade is visible too.</p>
+  <button className="primary-button" disabled={backendStatus !== 'ONLINE' || demoBusy} onClick={() => void runComparisonDemo()}>{demoBusy ? <><span className="spinner" /> {demoStep || 'Running…'}</> : <>Run healing OFF vs ON demo <span>▶</span></>}</button>
+  {demoRuns.length > 0 && <div className="table-wrap demo-table"><table>
+    <thead><tr><th>Measured by the monitor</th><th>Healing OFF</th><th>Healing ON</th></tr></thead>
+    <tbody>
+      <tr><td>Outcome</td><td>{demoCell(demoOff, r => r.incident ? statusLabel(r.incident.status) : 'No result')}</td><td>{demoCell(demoOn, r => r.incident ? statusLabel(r.incident.status) : 'No result')}</td></tr>
+      <tr><td>Detected in</td><td>{demoCell(demoOff, r => duration(r.incident?.detectionMs))}</td><td>{demoCell(demoOn, r => duration(r.incident?.detectionMs))}</td></tr>
+      <tr><td>Recovered in</td><td>{demoCell(demoOff, r => r.incident?.recoveryMs != null ? duration(r.incident.recoveryMs) : 'Not recovered')}</td><td>{demoCell(demoOn, r => r.incident?.recoveryMs != null ? duration(r.incident.recoveryMs) : 'Not recovered')}</td></tr>
+      <tr><td>Total time</td><td>{demoCell(demoOff, r => r.incident?.totalMs != null ? duration(r.incident.totalMs) : 'Not recovered')}</td><td>{demoCell(demoOn, r => r.incident?.totalMs != null ? duration(r.incident.totalMs) : 'Not recovered')}</td></tr>
+      <tr><td>PowerGrid afterwards</td><td>{demoCell(demoOff, r => statusLabel(r.powergrid))}</td><td>{demoCell(demoOn, r => statusLabel(r.powergrid))}</td></tr>
+      <tr><td>AquaFlow (dependent) afterwards</td><td>{demoCell(demoOff, r => statusLabel(r.aquaflow))}</td><td>{demoCell(demoOn, r => statusLabel(r.aquaflow))}</td></tr>
+    </tbody>
+  </table></div>}
+  <small className="fine-print">Timings come from the live health monitor, which checks every 2 seconds. Simulated services only. Reset in Incident History clears the evidence.</small>
+</section></>}
+      <footer className="page-footer"><span>© NEXORA · SMART CITY RESILIENCE</span><span>SIMULATED ENVIRONMENT · NOT FOR REAL INFRASTRUCTURE CONTROL</span></footer>
     </main>
     </div>
 );
 }
 
+function serviceSymbol(name: string) {
+  return name === 'PowerGrid' ? 'ϟ' : name === 'AquaFlow' ? '≈' : name === 'CityLink' ? '⌁' : '✚';
+}
+function sleep(ms: number) { return new Promise<void>(resolve => window.setTimeout(resolve, ms)); }
+async function fetchJson(path: string) {
+  const response = await fetch(`${API}${path}`, { cache: 'no-store' });
+  if (!response.ok) throw new Error(`Request failed (${response.status})`);
+  return response.json();
+}
+function Sparkline({ values }: { values: number[] }) {
+  if (values.length < 2) return <div className="sparkline-empty">Collecting live readings…</div>;
+  const width = 160;
+  const height = 36;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = max - min || 1;
+  const points = values.map((value, index) => `${((index / (values.length - 1)) * width).toFixed(1)},${(height - 3 - ((value - min) / span) * (height - 6)).toFixed(1)}`).join(' ');
+  return <svg className="sparkline" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" role="img" aria-label="Recent load readings"><polyline points={points} fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" /></svg>;
+}
 function Metric({ label, value, note, icon }: { label: string; value: string; note: string; icon: string }) { return <div className="metric-card"><div className="metric-top"><span>{label}</span><i>{icon}</i></div><strong className="metric-value">{value}</strong><small>{note}</small></div>; }
-function ServiceCard({ service, onRecover, disabled }: { service: Service; onRecover: () => void; disabled: boolean }) {
-  const primaryMetric = service.metricLabel === 'API Response'
-    ? `${service.latencyMs ?? 0} ${service.metricUnit ?? 'ms'}`
-    : service.metricLabel === 'Water Pressure'
-      ? `${service.loadPct ?? 0} ${service.metricUnit ?? '%'}`
-      : `${service.loadPct ?? 0}${service.metricUnit ?? '%'}`;
+function ServiceCard({ service, onRecover, disabled, history }: { service: Service; onRecover: () => void; disabled: boolean; history?: number[] }) {
+  const primaryMetric = `${service.loadPct ?? 0}${service.metricUnit ?? '%'}`;
   return <article className="service-card">
-    <div className="service-top"><div className={`service-symbol ${service.status.toLowerCase()}`}>{service.name === 'PowerGrid' ? 'ϟ' : service.name === 'AquaFlow' ? '≈' : service.name === 'CityLink' ? '⌁' : '✚'}</div><span className={`status-badge ${service.status === 'HEALTHY' ? 'good' : service.status === 'DEGRADED' ? 'warn' : 'bad'}`}><i />{statusLabel(service.status)}</span></div>
+    <div className="service-top"><div className={`service-symbol ${service.status.toLowerCase()}`}>{serviceSymbol(service.name)}</div><span className={`status-badge ${service.status === 'HEALTHY' ? 'good' : service.status === 'DEGRADED' ? 'warn' : 'bad'}`}><i />{statusLabel(service.status)}</span></div>
     <h3>{service.name}</h3><div className="service-category">{service.category}</div><p>{service.description}</p>
     <div className="service-telemetry"><div><span>{service.metricLabel ?? 'Service Load'}</span><strong>{primaryMetric}</strong></div><div><span>Response Time</span><strong>{service.latencyMs ?? 0} ms</strong></div></div>
+    <div className={`service-spark ${service.status.toLowerCase()}`}><Sparkline values={history ?? []} /><small>Live readings from dataset</small></div>
     <div className="service-checks"><span><i className={service.workerRunning ? 'check-ok' : 'check-bad'} />Worker</span><span><i className={service.dependencyAvailable ? 'check-ok' : 'check-bad'} />Dependency</span><span><i className={service.recordValid ? 'check-ok' : 'check-bad'} />Data</span></div>
     {(!service.monitorSignalAvailable || service.status !== 'HEALTHY' || service.queueDepth > 0) && <button className="recover-link" disabled={disabled} onClick={onRecover}>Run health-verified reset ↗</button>}
   </article>;

@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import rateLimit from 'express-rate-limit';
 import express from 'express';
 import cors from 'cors';
@@ -6,8 +7,10 @@ import multer from 'multer';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parse } from 'csv-parse/sync';
 import { stringify } from 'csv-stringify/sync';
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const overloadLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -21,7 +24,7 @@ const overloadLimiter = rateLimit({
 });
 const PORT = Number(process.env.PORT) || 5000;
 const MONGO_URI =
-  process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/phoenix';
+  process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/nexora';
 
 app.use(cors({ origin: process.env.CORS_ORIGIN || true }));
 app.use(express.json({ limit: '100kb' }));
@@ -34,7 +37,7 @@ app.get('/api/rate-limit-test', overloadLimiter, (req, res) => {
   });
 });
 
-const uploadDir = path.join(process.cwd(), 'server', 'uploads');
+const uploadDir = path.join(__dirname, 'uploads');
 
 fs.mkdirSync(uploadDir, { recursive: true });
 const upload = multer({
@@ -53,6 +56,29 @@ const upload = multer({
   },
 });
 
+const NUMERIC_FIELDS = [
+  'voltage', 'current', 'power_load_kw', 'frequency_hz',
+  'transformer_temp_c', 'pressure_psi', 'flow_rate_lpm',
+  'tank_level_percent', 'vehicle_count', 'sensor_latency_ms',
+  'available_beds', 'resource_count', 'emergency_units_available',
+];
+
+const VALID_RANGES = {
+  voltage: [0, 300],
+  current: [0, 500],
+  power_load_kw: [0, 100000],
+  frequency_hz: [45, 55],
+  transformer_temp_c: [-20, 200],
+  pressure_psi: [0, 300],
+  flow_rate_lpm: [0, 100000],
+  tank_level_percent: [0, 100],
+  vehicle_count: [0, 100000],
+  sensor_latency_ms: [0, 60000],
+  available_beds: [0, 10000],
+  resource_count: [0, 100000],
+  emergency_units_available: [0, 1000],
+};
+
 function healCsvRows(rows) {
   const report = {
     totalRecords: rows.length,
@@ -68,28 +94,8 @@ function healCsvRows(rows) {
     outliersFlagged: 0,
   };
 
-  const numericFields = [
-    'voltage', 'current', 'power_load_kw', 'frequency_hz',
-    'transformer_temp_c', 'pressure_psi', 'flow_rate_lpm',
-    'tank_level_percent', 'vehicle_count', 'sensor_latency_ms',
-    'available_beds', 'resource_count', 'emergency_units_available',
-  ];
-
-  const validRanges = {
-    voltage: [0, 300],
-    current: [0, 500],
-    power_load_kw: [0, 100000],
-    frequency_hz: [45, 55],
-    transformer_temp_c: [-20, 200],
-    pressure_psi: [0, 300],
-    flow_rate_lpm: [0, 100000],
-    tank_level_percent: [0, 100],
-    vehicle_count: [0, 100000],
-    sensor_latency_ms: [0, 60000],
-    available_beds: [0, 10000],
-    resource_count: [0, 100000],
-    emergency_units_available: [0, 1000],
-  };
+  const numericFields = NUMERIC_FIELDS;
+  const validRanges = VALID_RANGES;
 
   const fieldNames = Object.keys(rows[0] || {});
   const numericKeys = fieldNames.filter((key) =>
@@ -170,6 +176,7 @@ function healCsvRows(rows) {
   const seen = new Set();
   const cleanedRows = [];
   const changes = [];
+  const MAX_CHANGES = 200;
 
   for (const original of rows) {
     const row = { ...original };
@@ -180,10 +187,10 @@ function healCsvRows(rows) {
       Object.keys(row).sort().map((key) => [key, row[key]])
     );
 
-       if (seen.has(fingerprint)) {
+    if (seen.has(fingerprint)) {
       report.duplicateRecords++;
       report.removedRecords++;
-      if (changes.length < 200) {
+      if (changes.length < MAX_CHANGES) {
         changes.push({
           recordId, column: '(row)', before: 'duplicate', after: 'removed',
           action: 'REMOVED', reason: 'Exact duplicate record',
@@ -216,40 +223,40 @@ function healCsvRows(rows) {
         bounds &&
         (value < bounds.lower || value > bounds.upper);
 
-    if (isOutlier) {
-  report.outliersDetected++;
-  report.outliersFlagged++;
-  needsReview = true;
-  if (changes.length < 200) {
-    changes.push({
-      recordId, column: key, before: raw, after: raw,
-      action: 'FLAGGED', reason: 'Statistical outlier (IQR); kept for review',
-    });
-  }
-}
+      if (isOutlier) {
+        report.outliersDetected++;
+        report.outliersFlagged++;
+        needsReview = true;
+        if (changes.length < MAX_CHANGES) {
+          changes.push({
+            recordId, column: key, before: raw, after: raw,
+            action: 'FLAGGED', reason: 'Statistical outlier (IQR); kept for review',
+          });
+        }
+      }
       if (missing || invalid) {
         if (medians[key] !== undefined) {
-  row[key] = String(medians[key]);
-  report.repairedValues++;
-  changed = true;
-  if (changes.length < 200) {
-    changes.push({
-      recordId, column: key, before: raw, after: row[key],
-      action: 'REPAIRED',
-      reason: missing
-        ? 'Missing value replaced with column median'
-        : 'Invalid or out-of-range value replaced with column median',
-    });
-  }
-} else {
-  needsReview = true;
-  if (changes.length < 200) {
-    changes.push({
-      recordId, column: key, before: raw, after: raw,
-      action: 'FLAGGED', reason: 'No valid values to compute a median',
-    });
-  }
-}
+          row[key] = String(medians[key]);
+          report.repairedValues++;
+          changed = true;
+          if (changes.length < MAX_CHANGES) {
+            changes.push({
+              recordId, column: key, before: raw, after: row[key],
+              action: 'REPAIRED',
+              reason: missing
+                ? 'Missing value replaced with column median'
+                : 'Invalid or out-of-range value replaced with column median',
+            });
+          }
+        } else {
+          needsReview = true;
+          if (changes.length < MAX_CHANGES) {
+            changes.push({
+              recordId, column: key, before: raw, after: raw,
+              action: 'FLAGGED', reason: 'No valid values to compute a median',
+            });
+          }
+        }
       }
     }
 
@@ -393,7 +400,7 @@ const SERVICE_SEED = [
     id: 'powergrid',
     name: 'PowerGrid',
     category: 'Electricity',
-    description: 'Simulated electricity distribution',
+    description: 'Electricity distribution (readings streamed from powergrid.csv)',
     status: 'HEALTHY',
     workerRunning: true,
     dependencyAvailable: true,
@@ -409,7 +416,7 @@ const SERVICE_SEED = [
     id: 'aquaflow',
     name: 'AquaFlow',
     category: 'Water Supply',
-    description: 'Simulated water and pump services',
+    description: 'Water and pump services (readings streamed from aquaflow.csv)',
     status: 'HEALTHY',
     workerRunning: true,
     dependencyAvailable: true,
@@ -418,14 +425,14 @@ const SERVICE_SEED = [
     monitorSignalAvailable: true,
     loadPct: 41,
     latencyMs: 55,
-    metricLabel: 'Water Pressure',
-    metricUnit: 'kPa',
+    metricLabel: 'Tank Level',
+    metricUnit: '%',
   },
   {
     id: 'citylink',
     name: 'CityLink',
     category: 'Communications',
-    description: 'Simulated city communications network',
+    description: 'Traffic and signal network (readings streamed from citylink.csv)',
     status: 'HEALTHY',
     workerRunning: true,
     dependencyAvailable: true,
@@ -434,14 +441,14 @@ const SERVICE_SEED = [
     monitorSignalAvailable: true,
     loadPct: 27,
     latencyMs: 38,
-    metricLabel: 'Network Load',
+    metricLabel: 'Traffic Load',
     metricUnit: '%',
   },
   {
     id: 'medicore',
     name: 'MediCore',
     category: 'Hospital Resources',
-    description: 'Simulated hospital resource service',
+    description: 'Hospital resources (readings streamed from medicore.csv)',
     status: 'HEALTHY',
     workerRunning: true,
     dependencyAvailable: true,
@@ -450,8 +457,8 @@ const SERVICE_SEED = [
     monitorSignalAvailable: true,
     loadPct: 19,
     latencyMs: 64,
-    metricLabel: 'API Response',
-    metricUnit: 'ms',
+    metricLabel: 'Bed Occupancy',
+    metricUnit: '%',
   },
 ];
 const serviceSchema = new mongoose.Schema(
@@ -512,8 +519,8 @@ const incidentSchema = new mongoose.Schema(
   { versionKey: false },
 );
 
-const Service = mongoose.model('PhoenixService', serviceSchema);
-const Incident = mongoose.model('PhoenixIncident', incidentSchema);
+const Service = mongoose.model('NexoraService', serviceSchema);
+const Incident = mongoose.model('NexoraIncident', incidentSchema);
 
 
 
@@ -534,7 +541,7 @@ const dataHealingEventSchema = new mongoose.Schema(
 );
 
 const DataHealingEvent = mongoose.model(
-  'PhoenixDataHealingEvent',
+  'NexoraDataHealingEvent',
   dataHealingEventSchema
 );
 
@@ -580,7 +587,7 @@ const quarantinedRecordSchema = new mongoose.Schema(
 );
 
 const QuarantinedRecord = mongoose.model(
-  'PhoenixQuarantinedRecord',
+  'NexoraQuarantinedRecord',
   quarantinedRecordSchema
 );
 
@@ -653,7 +660,6 @@ function publicService(service) {
     metricLabel: service.metricLabel ?? 'Service Load',
     metricUnit: service.metricUnit ?? '%',
 
-    // Failure Prediction & Risk Score
     riskScore: service.riskScore ?? 0,
     riskLevel: service.riskLevel ?? 'LOW',
     riskReasons: service.riskReasons ?? [],
@@ -776,11 +782,410 @@ async function retryDependencyWithBackoff(serviceId, maxAttempts = 4) {
     attempts: maxAttempts,
   };
 }
+const DATASET_DIR = path.join(__dirname, '..', 'datasets');
+const ROWS_PER_CYCLE = 10;
+const HISTORY_POINTS = 40;
+const ZONE_COUNT = 10;
+const ANOMALY_TTL_MS = 15000;
+
+const TELEMETRY_SOURCES = {
+  powergrid: { file: 'powergrid.csv', loadField: 'power_load_kw', loadMax: 12 },
+  aquaflow: { file: 'aquaflow.csv', loadField: 'tank_level_percent', loadMax: 100 },
+  citylink: { file: 'citylink.csv', loadField: 'vehicle_count', loadMax: 200 },
+  medicore: {
+    file: 'medicore.csv',
+    loadField: 'available_beds',
+    loadMax: 100,
+    invert: true,
+  },
+};
+
+const telemetry = {};
+const recentAnomalies = [];
+
+function loadTelemetry() {
+  for (const [id, source] of Object.entries(TELEMETRY_SOURCES)) {
+    try {
+      const content = fs.readFileSync(
+        path.join(DATASET_DIR, source.file),
+        'utf8',
+      );
+
+      const rows = parse(content, {
+        columns: true,
+        skip_empty_lines: true,
+        trim: true,
+        bom: true,
+        relax_column_count: true,
+      });
+
+      telemetry[id] = {
+        source,
+        rows,
+        cursor: 0,
+        history: [],
+        loadPct: null,
+        anomalyCount: 0,
+        zones: {},
+      };
+
+      console.log(`[NEXORA] Telemetry loaded: ${source.file} (${rows.length} rows)`);
+    } catch (error) {
+      console.warn(
+        `[NEXORA] Telemetry dataset not loaded for ${id}: ${error.message}`,
+      );
+    }
+  }
+}
+
+function zoneNumber(row) {
+  const match = /(\d+)/.exec(String(row.area ?? ''));
+  return match ? Number(match[1]) : null;
+}
+function readingProblem(row) {
+  for (const [field, [min, max]] of Object.entries(VALID_RANGES)) {
+    if (!(field in row)) continue;
+
+    const raw = String(row[field] ?? '').trim();
+
+    if (raw === '') return `${field} is missing`;
+
+    const value = Number(raw);
+
+    if (!Number.isFinite(value)) return `${field} is not a number (${raw})`;
+    if (value < min || value > max) return `${field} out of range (${raw})`;
+  }
+
+  return null;
+}
+
+function advanceTelemetry() {
+  const now = Date.now();
+
+  for (const [serviceId, state] of Object.entries(telemetry)) {
+    if (!state.rows.length) continue;
+
+    const loads = [];
+
+    for (let i = 0; i < ROWS_PER_CYCLE; i++) {
+      const row = state.rows[state.cursor % state.rows.length];
+      state.cursor++;
+
+      const zone = zoneNumber(row);
+      const problem = readingProblem(row);
+
+      if (problem && zone) {
+        state.zones[zone] = {
+          until: now + ANOMALY_TTL_MS,
+          reason: problem,
+          recordId: row.record_id,
+        };
+
+        state.anomalyCount++;
+
+        recentAnomalies.unshift({
+          at: new Date(now).toISOString(),
+          serviceId,
+          zone,
+          recordId: row.record_id,
+          reason: problem,
+        });
+
+        if (recentAnomalies.length > 30) recentAnomalies.pop();
+      }
+
+      const value = Number(String(row[state.source.loadField] ?? '').trim());
+
+      if (
+        Number.isFinite(value) &&
+        value >= 0 &&
+        value <= state.source.loadMax
+      ) {
+        loads.push(value);
+      }
+    }
+
+    if (loads.length) {
+      const mean = loads.reduce((sum, value) => sum + value, 0) / loads.length;
+      const pct = (mean / state.source.loadMax) * 100;
+
+      state.loadPct = Math.max(
+        1,
+        Math.min(99, Math.round(state.source.invert ? 100 - pct : pct)),
+      );
+
+      state.history.push(state.loadPct);
+
+      if (state.history.length > HISTORY_POINTS) state.history.shift();
+    }
+  }
+}
+
+function buildZones(services) {
+  const now = Date.now();
+  const zones = [];
+
+  for (let zone = 1; zone <= ZONE_COUNT; zone++) {
+    const cells = {};
+
+    for (const service of services) {
+      let state = 'HEALTHY';
+      let reason = null;
+
+      if (service.status === 'FAILED') {
+        state = 'FAILED';
+        reason = 'Service failed';
+      } else if (service.status === 'DEGRADED') {
+        state = 'DEGRADED';
+        reason = 'Service degraded';
+      } else {
+        const flagged = telemetry[service.id]?.zones[zone];
+
+        if (flagged && flagged.until > now) {
+          state = 'ANOMALY';
+          reason = `${flagged.recordId}: ${flagged.reason}`;
+        }
+      }
+
+      cells[service.id] = { state, reason };
+    }
+
+    const states = Object.values(cells).map((cell) => cell.state);
+
+    const overall = states.includes('FAILED')
+      ? 'FAILED'
+      : states.includes('DEGRADED')
+        ? 'DEGRADED'
+        : states.includes('ANOMALY')
+          ? 'ANOMALY'
+          : 'HEALTHY';
+
+    zones.push({ zone, name: `Zone-${zone}`, overall, cells });
+  }
+
+  return zones;
+}
+
+const DIAGNOSIS = {
+  PROCESS_CRASH: 'Worker health check failed: worker is not running.',
+  DEPENDENCY_TIMEOUT:
+    'Dependency probe failed; the simulated dependency is unavailable.',
+  INVALID_RECORD: 'Data validation failed; the active demo record is invalid.',
+  REQUEST_OVERLOAD: 'Queue depth crossed the safe threshold.',
+};
+
+const RECOVERY_ACTION = {
+  PROCESS_CRASH: 'Supervisor restarted the simulated worker.',
+  DEPENDENCY_TIMEOUT:
+    'Retry with exponential backoff; simulated dependency restored.',
+  INVALID_RECORD: 'Invalid record quarantined; safe fixture restored.',
+  REQUEST_OVERLOAD: 'Simulated request queue drained.',
+};
+
+function faultTypeOf(service) {
+  if (!service.workerRunning) return 'PROCESS_CRASH';
+  if (!service.recordValid) return 'INVALID_RECORD';
+  if (service.queueDepth > 5) return 'REQUEST_OVERLOAD';
+  return 'DEPENDENCY_TIMEOUT';
+}
+
+function isFullyHealthy(service) {
+  return Boolean(
+    service &&
+      service.workerRunning &&
+      service.dependencyAvailable &&
+      service.recordValid &&
+      service.queueDepth <= 5 &&
+      service.monitorSignalAvailable,
+  );
+}
+
+async function resolveBlindSpot(service) {
+  const open = await Incident.findOne({
+    serviceId: service.id,
+    status: 'INJECTED',
+    type: 'UNOBSERVABLE_FAULT',
+  }).sort({ injectedAt: -1 });
+
+  if (!open) return;
+
+  const failedAt = new Date();
+
+  await saveIncident({
+    incidentId: open.incidentId,
+    status: 'DETECTION_FAILED',
+    diagnosis:
+      'The health monitor could not read a health signal. The fault was not detected by the monitor.',
+    recoveryAction:
+      'No automatic recovery was triggered because diagnosis was unavailable.',
+    verification: 'NOT_VERIFIED',
+    failedAt,
+    totalMs: timeMs(open.injectedAt, failedAt),
+    notes:
+      'Known monitoring blind spot; this run is not counted as a successful detection or recovery.',
+  });
+}
+
+async function handleFault(service, services) {
+  const detectedAt = new Date();
+
+  const open = await Incident.findOne({
+    serviceId: service.id,
+    status: 'INJECTED',
+  }).sort({ injectedAt: -1 });
+
+  if (!healingEnabled) {
+    if (open) {
+      await saveIncident({
+        incidentId: open.incidentId,
+        status: 'FAILED',
+        diagnosis: DIAGNOSIS[faultTypeOf(service)],
+        recoveryAction: 'Healing is OFF; no automatic recovery attempted.',
+        verification: 'NOT_RUN — healing disabled',
+        detectedAt,
+        diagnosedAt: new Date(),
+        detectionMs: timeMs(open.injectedAt, detectedAt),
+        failedAt: new Date(),
+        notes:
+          'The fault was detected by the health monitor, but automatic healing was disabled.',
+      });
+    }
+
+    return;
+  }
+  const upstreamIds = Object.keys(DEPENDENTS).filter((id) =>
+    DEPENDENTS[id].includes(service.id),
+  );
+
+  const upstreamUnavailable = upstreamIds.some((id) => {
+    const upstream = services.find((item) => item.id === id);
+
+    return (
+      upstream &&
+      (!upstream.workerRunning ||
+        !upstream.dependencyAvailable ||
+        !upstream.monitorSignalAvailable)
+    );
+  });
+
+  if (upstreamUnavailable) return;
+
+  const type = faultTypeOf(service);
+  const injectedAt = open?.injectedAt ?? detectedAt;
+
+  const incidentId =
+    open?.incidentId ??
+    `NX-AUTO-${Date.now()}-` +
+      Math.random().toString(36).slice(2, 6).toUpperCase();
+
+  const incident = {
+    incidentId,
+    serviceId: service.id,
+    serviceName: service.name,
+    type,
+    status: 'RECOVERING',
+    diagnosis: DIAGNOSIS[type],
+    recoveryAction: RECOVERY_ACTION[type],
+    verification: 'PENDING',
+    injectedAt,
+    detectedAt,
+    diagnosedAt: new Date(),
+    actionTakenAt: new Date(),
+    recoveredAt: null,
+    failedAt: null,
+    detectionMs: timeMs(injectedAt, detectedAt),
+    recoveryMs: null,
+    totalMs: null,
+    healingEnabled: true,
+    notes: open
+      ? 'Fault injected from Chaos Lab; detected and healed by the background monitor.'
+      : 'Detected by the background monitor (injection time unknown).',
+  };
+
+  activeTests.add(service.id);
+
+  try {
+    await saveIncident(incident);
+
+    const patch = {};
+
+    if (!service.workerRunning) patch.workerRunning = true;
+    if (!service.recordValid) patch.recordValid = true;
+    if (service.queueDepth > 5) patch.queueDepth = 0;
+
+    if (!service.dependencyAvailable) {
+      const retry = await retryDependencyWithBackoff(service.id);
+
+      if (!retry.success) {
+        incident.status = 'FAILED';
+        incident.failedAt = new Date();
+        incident.verification =
+          'FAILED — dependency remained unavailable after retries.';
+        incident.notes = `Dependency retry exhausted after ${retry.attempts} attempts.`;
+
+        await saveIncident(incident);
+        return;
+      }
+
+      patch.dependencyAvailable = true;
+    }
+
+    if (!service.recordValid) {
+      const quarantineId = randomUUID();
+
+      await QuarantinedRecord.create({
+        quarantineId,
+        incidentId,
+        serviceId: service.id,
+        source: 'SIMULATED_DEMO_FIXTURE',
+        originalRecord: {
+          recordId: `demo-${incidentId}`,
+          serviceId: service.id,
+          valid: false,
+          sampleValue: 'INVALID_DEMO_VALUE',
+        },
+        reason: 'Invalid demo record isolated during self-healing recovery.',
+        status: 'QUARANTINED',
+      });
+
+      incident.recoveryAction = `Invalid demo record quarantined (${quarantineId}); safe fixture restored.`;
+    }
+
+    await updateService(service.id, patch);
+
+    // Verify immediately: re-read the service and run the same health checks.
+    const check = await getService(service.id);
+
+    if (isFullyHealthy(check)) {
+      await updateService(service.id, { status: 'HEALTHY' });
+      await restoreDependents(service.id);
+
+      incident.status = 'RECOVERED';
+      incident.recoveredAt = new Date();
+      incident.verification =
+        'PASSED — post-recovery health and data checks succeeded.';
+      incident.recoveryMs = timeMs(incident.detectedAt, incident.recoveredAt);
+      incident.totalMs = timeMs(injectedAt, incident.recoveredAt);
+    } else {
+      incident.status = 'FAILED';
+      incident.failedAt = new Date();
+      incident.verification = 'FAILED — post-recovery health check did not pass.';
+    }
+
+    await saveIncident(incident);
+  } finally {
+    activeTests.delete(service.id);
+  }
+}
+
+let monitorBusy = false;
 
 async function runHealthMonitor() {
   if (!dbReady || mongoose.connection.readyState !== 1) return;
 
   try {
+    advanceTelemetry();
+
     const services = await Service.find().lean();
 
     let healthy = 0;
@@ -788,15 +1193,9 @@ async function runHealthMonitor() {
     let failed = 0;
 
     for (const service of services) {
-      // These are simulated readings, not real city-system measurements.
-      const loadPct = Math.max(
-        5,
-        Math.min(
-          98,
-          (Number(service.loadPct) || 25) +
-            Math.round((Math.random() - 0.5) * 8),
-        ),
-      );
+      
+      const loadPct =
+        telemetry[service.id]?.loadPct ?? (Number(service.loadPct) || 25);
 
       const latencyMs = Math.max(
         10,
@@ -808,10 +1207,12 @@ async function runHealthMonitor() {
       );
 
       await updateService(service.id, { loadPct, latencyMs });
+
       if (!service.monitorSignalAvailable) {
-  failed++;
-  continue;
-}
+        await resolveBlindSpot(service);
+        failed++;
+        continue;
+      }
 
       const checksPass =
         service.workerRunning &&
@@ -829,140 +1230,8 @@ async function runHealthMonitor() {
         await updateService(service.id, { status: nextStatus });
       }
 
-      if (
-        !checksPass &&
-        healingEnabled &&
-        !activeTests.has(service.id)
-      ) {
-        const upstreamIds = Object.keys(DEPENDENTS).filter((id) =>
-          DEPENDENTS[id].includes(service.id),
-        );
-
-        const upstreamUnavailable = upstreamIds.some((id) => {
-          const upstream = services.find((item) => item.id === id);
-
-          return (
-            upstream &&
-            (!upstream.workerRunning ||
-              !upstream.dependencyAvailable ||
-              !upstream.monitorSignalAvailable)
-          );
-        });
-
-        if (!upstreamUnavailable) {
-          const injectedAt = new Date();
-
-          const incidentId =
-            `NX-AUTO-${Date.now()}-` +
-            Math.random().toString(36).slice(2, 6).toUpperCase();
-
-          const type = !service.workerRunning
-            ? 'PROCESS_CRASH'
-            : !service.recordValid
-              ? 'INVALID_RECORD'
-              : service.queueDepth > 5
-                ? 'REQUEST_OVERLOAD'
-                : 'DEPENDENCY_TIMEOUT';
-
-          const diagnosis = !service.workerRunning
-            ? 'Monitor found that the service worker had stopped.'
-            : !service.recordValid
-              ? 'Monitor found an invalid active demo record.'
-              : service.queueDepth > 5
-                ? `Monitor found unsafe queue depth (${service.queueDepth}).`
-                : 'Monitor found that a required dependency was unavailable.';
-
-          const recoveryAction = !service.workerRunning
-            ? 'Supervisor restarted the simulated worker.'
-            : !service.recordValid
-              ? 'Invalid demo record quarantined; safe fixture restored.'
-              : service.queueDepth > 5
-                ? 'Simulated request queue drained.'
-                : 'Simulated dependency restored.';
-
-          const incident = {
-            incidentId,
-            serviceId: service.id,
-            serviceName: service.name,
-            type,
-            status: 'RECOVERING',
-            diagnosis,
-            recoveryAction,
-            verification: 'PENDING',
-           injectedAt,
-            detectedAt: new Date(),
-            diagnosedAt: new Date(),
-            actionTakenAt: new Date(),
-            recoveredAt: null,
-            failedAt: null,
-           detectionMs: timeMs(injectedAt, new Date()),
-            recoveryMs: null,
-            totalMs: null,
-            healingEnabled: true,
-            notes: 'Automatically detected by the background monitor.',
-          };
-
-          activeTests.add(service.id);
-
-          try {
-            await saveIncident(incident);
-
-            const recoveryPatch = !service.workerRunning
-              ? { workerRunning: true }
-              : !service.recordValid
-                ? { recordValid: true }
-                : service.queueDepth > 5
-                  ? { queueDepth: 0 }
-                  : { dependencyAvailable: true };
-
-            await updateService(service.id, recoveryPatch);
-            await wait(500);
-
-            const check = await getService(service.id);
-
-            const verified = Boolean(
-              check &&
-                check.workerRunning &&
-                check.dependencyAvailable &&
-                check.recordValid &&
-                check.queueDepth <= 5 &&
-                check.monitorSignalAvailable,
-            );
-if (verified) {
-  await updateService(service.id, { status: 'HEALTHY' });
-  await restoreDependents(service.id);
-
-  incident.status = 'RECOVERED';
-  incident.recoveredAt = new Date();
-  incident.verification =
-    'PASSED — post-recovery health and data checks succeeded.';
-
-  incident.actionTakenAt =
-    incident.actionTakenAt || incident.recoveredAt;
-  incident.diagnosedAt =
-    incident.diagnosedAt || incident.detectedAt;
-
-  incident.recoveryMs = timeMs(
-    incident.detectedAt,
-    incident.recoveredAt,
-  );
-
-  incident.totalMs = timeMs(
-    injectedAt,
-    incident.recoveredAt,
-  );
-} else {
-  incident.status = 'FAILED';
-  incident.failedAt = new Date();
-  incident.verification =
-    'FAILED — post-recovery health check did not pass.';
-}
-
-await saveIncident(incident);
-          } finally {
-            activeTests.delete(service.id);
-          }
-        }
+      if (!checksPass && !activeTests.has(service.id)) {
+        await handleFault(service, services);
       }
 
       const refreshed = await getService(service.id);
@@ -987,9 +1256,17 @@ await saveIncident(incident);
 }
 
 setInterval(() => {
-  runHealthMonitor().catch((error) => {
-    console.error('[NEXORA monitor error]', error.message);
-  });
+  if (monitorBusy) return;
+
+  monitorBusy = true;
+
+  runHealthMonitor()
+    .catch((error) => {
+      console.error('[NEXORA monitor error]', error.message);
+    })
+    .finally(() => {
+      monitorBusy = false;
+    });
 }, MONITOR_INTERVAL_MS);
 
 app.get('/api/monitor', (_req, res) => {
@@ -997,6 +1274,26 @@ app.get('/api/monitor', (_req, res) => {
     ...monitorState,
     intervalMs: MONITOR_INTERVAL_MS,
   });
+});
+
+app.get('/api/telemetry', async (_req, res, next) => {
+  try {
+    const services = await Service.find().sort({ id: 1 }).lean();
+
+    res.json({
+      source: 'Rows streamed from client/datasets/*.csv (10 rows per monitor cycle)',
+      zones: buildZones(services),
+      series: Object.fromEntries(
+        Object.entries(telemetry).map(([id, state]) => [
+          id,
+          { history: state.history, anomalyCount: state.anomalyCount },
+        ]),
+      ),
+      recentAnomalies,
+    });
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.get('/api/health', (_req, res) => {
@@ -1145,7 +1442,6 @@ app.get('/api/risk-scores', async (_req, res, next) => {
   }
 });
 
-// 11. Incident history
 app.get('/api/incidents', async (_req, res, next) => {
   try {
     const incidents = await Incident.find()
@@ -1287,27 +1583,35 @@ app.post(
       if (activeTests.has(serviceId)) {
         return res.status(409).json({
           message:
-            'A test is already running for this service. Wait for it to finish.',
+            'A recovery is already running for this service. Wait for it to finish.',
         });
       }
 
-      activeTests.add(serviceId);
+      const stillOpen = await Incident.findOne({
+        serviceId,
+        status: { $in: ['INJECTED', 'RECOVERING'] },
+        injectedAt: { $gte: new Date(Date.now() - 60 * 1000) },
+      });
+
+      if (stillOpen) {
+        return res.status(409).json({
+          message:
+            'An incident for this service is still being handled. Wait for the monitor to finish.',
+        });
+      }
 
       const injectedAt = new Date();
       const incidentId =
         `NX-${Date.now()}-` +
         Math.random().toString(36).slice(2, 7).toUpperCase();
 
-      const canHeal =
-        healingEnabled && type !== 'UNOBSERVABLE_FAULT';
-
-      const incident = {
+      await saveIncident({
         incidentId,
         serviceId,
         serviceName: service.name,
         type,
         status: 'INJECTED',
-        diagnosis: 'Test fault injected; awaiting health probe.',
+        diagnosis: 'Fault injected; waiting for the health monitor to detect it.',
         recoveryAction: 'Pending automated diagnosis.',
         verification: 'PENDING',
         injectedAt,
@@ -1319,236 +1623,26 @@ app.post(
         totalMs: null,
         healingEnabled,
         notes: '',
-      };
-
-      await saveIncident(incident);
-
-      if (type === 'UNOBSERVABLE_FAULT') {
-        await updateService(serviceId, {
-          monitorSignalAvailable: false,
-          status: 'FAILED',
-        });
-
-        await markDependentsDegraded(serviceId);
-        await wait(2500);
-
-        incident.status = 'DETECTION_FAILED';
-        incident.diagnosis =
-          'The health monitor could not read a health signal. The fault was not detected by the monitor.';
-        incident.recoveryAction =
-          'No automatic recovery was triggered because diagnosis was unavailable.';
-        incident.verification = 'NOT_VERIFIED';
-        incident.failedAt = new Date();
-        incident.totalMs = timeMs(injectedAt, incident.failedAt);
-        incident.notes =
-          'Known monitoring blind spot; this run is not counted as a successful detection or recovery.';
-
-        await saveIncident(incident);
-
-        return res.status(202).json({
-          message:
-            'Detection blind spot injected. Outcome recorded as DETECTION_FAILED.',
-          incidentId,
-          status: incident.status,
-        });
-      }
+      });
 
       const faultPatch = {
-        PROCESS_CRASH: {
-          workerRunning: false,
-          status: 'FAILED',
-        },
-        DEPENDENCY_TIMEOUT: {
-          dependencyAvailable: false,
-          status: 'DEGRADED',
-        },
-        INVALID_RECORD: {
-          recordValid: false,
-          status: 'DEGRADED',
-        },
-        REQUEST_OVERLOAD: {
-          queueDepth: 100,
-          status: 'DEGRADED',
-        },
+        PROCESS_CRASH: { workerRunning: false, status: 'FAILED' },
+        DEPENDENCY_TIMEOUT: { dependencyAvailable: false, status: 'DEGRADED' },
+        INVALID_RECORD: { recordValid: false, status: 'DEGRADED' },
+        REQUEST_OVERLOAD: { queueDepth: 100, status: 'DEGRADED' },
+        UNOBSERVABLE_FAULT: { monitorSignalAvailable: false, status: 'FAILED' },
       }[type];
 
       await updateService(serviceId, faultPatch);
       await markDependentsDegraded(serviceId);
-      await wait(350);
-
-      incident.detectedAt = new Date();
-      incident.detectionMs = timeMs(injectedAt, incident.detectedAt);
-      incident.status = 'DETECTED';
-
-      incident.diagnosis = {
-  PROCESS_CRASH:
-    'Worker health check failed: worker is not running.',
-  DEPENDENCY_TIMEOUT:
-    'Dependency probe failed; the simulated dependency is unavailable.',
-  INVALID_RECORD:
-    'Data validation failed; the active demo record is invalid.',
-  REQUEST_OVERLOAD:
-    'Queue depth crossed the safe threshold.',
-}[type];
-
-incident.diagnosedAt = new Date();
-
-      incident.recoveryAction = canHeal
-        ? 'Automatic recovery scheduled by the recovery controller.'
-        : 'Healing is OFF; no automatic recovery attempted.';
-
-      await saveIncident(incident);
-
-      if (!canHeal) {
-        incident.status = 'FAILED';
-        incident.failedAt = new Date();
-        incident.verification = 'NOT_RUN — healing disabled';
-        incident.notes =
-          'The fault was detected, but automatic healing was disabled.';
-
-        await saveIncident(incident);
-
-        return res.status(202).json({
-          message:
-            'Failure detected. Healing is OFF, so the service remains failed or degraded.',
-          incidentId,
-          status: incident.status,
-        });
-      }
-
-     incident.status = 'RECOVERING';
-
-incident.recoveryAction = {
-  PROCESS_CRASH:
-    'Supervisor restarted the simulated worker.',
-  DEPENDENCY_TIMEOUT:
-    'Simulated retry/backoff completed and dependency restored.',
-  INVALID_RECORD:
-    'Invalid demo record quarantined; safe fixture restored.',
-  REQUEST_OVERLOAD:
-    'Rate-limited failure injection accepted; simulated queue drained.',
-}[type];
-
-incident.actionTakenAt = new Date();
-
-      await saveIncident(incident);
-
-      const recoveryPatch = {
-        PROCESS_CRASH: {
-          workerRunning: true,
-        },
-        DEPENDENCY_TIMEOUT: {
-          dependencyAvailable: true,
-        },
-        INVALID_RECORD: {
-          recordValid: true,
-        },
-        REQUEST_OVERLOAD: {
-          queueDepth: 0,
-        },
-      }[type];
-
-      if (type === 'DEPENDENCY_TIMEOUT') {
-        const retryResult =
-          await retryDependencyWithBackoff(serviceId);
-
-        if (!retryResult.success) {
-          incident.status = 'FAILED';
-          incident.failedAt = new Date();
-          incident.verification =
-            'FAILED — dependency remained unavailable after retries.';
-          incident.notes =
-            `Dependency retry exhausted after ${retryResult.attempts} attempts.`;
-
-          await saveIncident(incident);
-
-          return res.status(202).json({
-            message: 'Dependency recovery failed after retries.',
-            incidentId,
-            status: incident.status,
-          });
-        }
-      } else if (type === 'INVALID_RECORD') {
-        const quarantineId = randomUUID();
-
-        const quarantinedRecord = await QuarantinedRecord.create({
-          quarantineId,
-          incidentId,
-          serviceId,
-          source: 'SIMULATED_DEMO_FIXTURE',
-          originalRecord: {
-            recordId: `demo-${incidentId}`,
-            serviceId,
-            valid: false,
-            sampleValue: 'INVALID_DEMO_VALUE',
-          },
-          reason:
-            'Invalid demo record isolated during self-healing recovery.',
-          status: 'QUARANTINED',
-        });
-
-        await updateService(serviceId, recoveryPatch);
-
-        incident.recoveryAction =
-          `Invalid demo fixture quarantined (${quarantinedRecord.quarantineId}); safe fixture restored.`;
-
-        incident.notes =
-          `Quarantine record saved in MongoDB. ID: ${quarantinedRecord.quarantineId}. Source: SIMULATED_DEMO_FIXTURE.`;
-      } else {
-        await updateService(serviceId, recoveryPatch);
-      }
-
-      await wait(900);
-
-      const check = await getService(serviceId);
-
-      const verified = Boolean(
-        check &&
-          check.workerRunning &&
-          check.dependencyAvailable &&
-          check.recordValid &&
-          check.queueDepth <= 5 &&
-          check.monitorSignalAvailable,
-      );
-
-      if (verified) {
-        await updateService(serviceId, { status: 'HEALTHY' });
-        await restoreDependents(serviceId);
-
-        incident.status = 'RECOVERED';
-        incident.recoveredAt = new Date();
-        incident.verification =
-          'PASSED — post-recovery health and data checks succeeded.';
-        incident.recoveryMs = timeMs(
-          incident.detectedAt,
-          incident.recoveredAt,
-        );
-        incident.totalMs = timeMs(
-          injectedAt,
-          incident.recoveredAt,
-        );
-      } else {
-        incident.status = 'FAILED';
-        incident.failedAt = new Date();
-        incident.verification =
-          'FAILED — post-recovery health check did not pass.';
-        incident.notes =
-          'Recovery was attempted, but verification failed.';
-      }
-
-      await saveIncident(incident);
 
       return res.status(202).json({
-        message: verified
-          ? 'Failure automatically recovered and verified.'
-          : 'Recovery attempt failed verification.',
+        message: `Fault injected into ${service.name}. The health monitor checks every ${MONITOR_INTERVAL_MS / 1000} s; watch Incident History for the result.`,
         incidentId,
-        status: incident.status,
+        status: 'INJECTED',
       });
     } catch (error) {
       next(error);
-    } finally {
-      activeTests.delete(serviceId);
     }
   },
 );
@@ -1746,10 +1840,10 @@ async function startServer() {
     });
 
     dbReady = true;
+    loadTelemetry();
     console.log(`MongoDB connected: ${mongoose.connection.name}`);
 
     for (const seed of SERVICE_SEED) {
-      // Update existing records with new telemetry fields too.
       await Service.findOneAndUpdate(
         { id: seed.id },
         {

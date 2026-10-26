@@ -1,4 +1,4 @@
-const API = 'http://localhost:5000/api';
+const API = `${process.env.API_URL || 'http://localhost:5000'}/api`;
 
 async function request(path, options = {}) {
   const response = await fetch(`${API}${path}`, {
@@ -44,17 +44,29 @@ async function runFailure(serviceId, type) {
   console.log('Test result:', result.status);
   console.log('Message:', result.message);
 
-  const allIncidents = await request('/incidents');
+  let incident = null;
+  const deadline = Date.now() + 20000;
 
-  const incident = allIncidents.incidents.find(
-    (item) => item.incidentId === result.incidentId,
-  );
+  while (Date.now() < deadline) {
+    const allIncidents = await request('/incidents');
+
+    incident = allIncidents.incidents.find(
+      (item) => item.incidentId === result.incidentId,
+    );
+
+    if (incident && !['INJECTED', 'RECOVERING'].includes(incident.status)) {
+      break;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
 
   if (incident) {
     console.log('Incident ID:', incident.incidentId);
-    console.log('Detection:', incident.detectionMs ?? 'Not detected');
-    console.log('Recovery:', incident.recoveryMs ?? 'Not recovered');
-    console.log('Total time:', incident.totalMs ?? 'Not recovered');
+    console.log('Final status:', incident.status);
+    console.log('Detection:', incident.detectionMs ?? 'Not detected', 'ms');
+    console.log('Recovery:', incident.recoveryMs ?? 'Not recovered', 'ms');
+    console.log('Total time:', incident.totalMs ?? 'Not recovered', 'ms');
     console.log('Verification:', incident.verification);
   } else {
     console.log('Check Incident History for the saved record.');
@@ -87,7 +99,6 @@ async function main() {
   await setHealing(false);
   await runFailure('aquaflow', 'DEPENDENCY_TIMEOUT');
 
-  // Restore AquaFlow before the ON comparison.
   await recoverService('aquaflow');
 
   console.log('\n--- Healing ON comparison ---');
@@ -114,9 +125,6 @@ async function main() {
   await setHealing(true);
   await runFailure('citylink', 'UNOBSERVABLE_FAULT');
 
-  // Intentionally do not reset CityLink.
-  // It should remain FAILED for the demo.
-  // Restore it manually after recording the results.
 
   console.log('\n================================');
   console.log('CHAOS TESTS FINISHED');
